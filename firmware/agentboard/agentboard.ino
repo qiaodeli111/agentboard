@@ -504,6 +504,9 @@ void handleButton() {
     if (lastDataMs) render();       // repaint immediately (notifs may clear next push)
   } else if (!pressed && pressStart) {
     if (!longFired && now - pressStart > 30 && now - pressStart < 800) {
+      if (page == 0) {
+        Serial.print("SEEN\n");      // leaving the notification page = viewed
+      }
       page = (page + 1) % 3;
       if (lastDataMs) render();
     }

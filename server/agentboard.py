@@ -472,6 +472,7 @@ class NotifStore:
     Cleared by user ack (KEY long-press on the display, or the dashboard)."""
 
     SEEN_TTL = 1800          # seen notifications disappear after 30 min
+    UNSEEN_TTL = 7200        # never-touched notifications give up after 2 h
 
     def __init__(self):
         self.items = []
@@ -520,7 +521,8 @@ class NotifStore:
         with self.lock:
             before = len(self.items)
             self.items = [n for n in self.items
-                          if not (n.get("seen") and now - n.get("seen_ts", 0) > self.SEEN_TTL)]
+                          if not (n.get("seen") and now - n.get("seen_ts", 0) > self.SEEN_TTL)
+                          and not (not n.get("seen") and now - n["ts"] > self.UNSEEN_TTL)]
             if len(self.items) != before:
                 self._save()
 
@@ -815,15 +817,22 @@ def serial_pusher():
                         rx += chunk
                         while b"\n" in rx:
                             line, rx = rx.split(b"\n", 1)
-                            if line.strip() in (b"ACK", b"ack"):
+                            tag = line.strip()
+                            if tag in (b"ACK", b"ack"):
                                 n = NOTIFS.clear()
                                 print(f"[agentboard] display ACK, cleared {n} notifs",
                                       flush=True)
-                                with STATE_LOCK:
-                                    snap = SNAPSHOT
-                                if snap.get("generated_at"):
-                                    os.write(fd, wire_payload(snap))
-                                last_push = time.time()
+                            elif tag in (b"SEEN", b"seen"):
+                                NOTIFS.mark_seen()
+                                print("[agentboard] display SEEN, marked notifs read",
+                                      flush=True)
+                            else:
+                                continue
+                            with STATE_LOCK:
+                                snap = SNAPSHOT
+                            if snap.get("generated_at"):
+                                os.write(fd, wire_payload(snap))
+                            last_push = time.time()
                 except OSError:
                     os.close(fd)
                     fd = None
