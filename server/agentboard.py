@@ -883,7 +883,7 @@ DASHBOARD = """<!doctype html><html lang=zh><meta charset=utf-8>
 <table id=t></table>
 <p class=mut id=procs></p>
 <script>
-const AG={claude:'Claude Code',codex:'Codex',pi:'pi',chatgpt:'ChatGPT'};
+const AG={claude:'✳ Claude',codex:'⌨ Codex',pi:'π pi',chatgpt:'💬 ChatGPT'};
 const ST={running:'● 运行中',idle:'◐ 空闲',done:'○ 结束'};
 function fmtAge(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';return Math.floor(s/86400)+'d'}
 function fmtT(n){if(n>1e6)return (n/1e6).toFixed(1)+'M';if(n>1e3)return (n/1e3).toFixed(0)+'k';return n}

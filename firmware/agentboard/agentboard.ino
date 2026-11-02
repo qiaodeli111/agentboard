@@ -140,6 +140,42 @@ void drawStateGlyph(int x, int y, const char* state) {
   else { u8g2.drawDisc(x + 4, y - 3, 2); u8g2.drawCircle(x + 4, y - 3, 4); }
 }
 
+// 14x11 agent icons at (x, yTop). claude = 8-ray starburst, codex = terminal
+// ">_ box", pi = Greek π, chatgpt = speech bubble. Honors current draw color.
+void drawAgentIcon(int x, int yTop, const char* a) {
+  if (!strcmp(a, "claude")) {
+    int cx = x + 6, cy = yTop + 5;
+    u8g2.drawLine(cx - 5, cy, cx + 5, cy);
+    u8g2.drawLine(cx, cy - 5, cx, cy + 5);
+    u8g2.drawLine(cx - 3, cy - 3, cx + 3, cy + 3);
+    u8g2.drawLine(cx - 3, cy + 3, cx + 3, cy - 3);
+  } else if (!strcmp(a, "codex")) {
+    u8g2.drawFrame(x, yTop, 13, 11);
+    u8g2.drawLine(x + 3, yTop + 3, x + 6, yTop + 5);
+    u8g2.drawLine(x + 6, yTop + 5, x + 3, yTop + 7);
+    u8g2.drawLine(x + 7, yTop + 7, x + 10, yTop + 7);
+  } else if (!strcmp(a, "pi")) {
+    u8g2.drawLine(x + 1, yTop + 2, x + 12, yTop + 2);
+    u8g2.drawLine(x + 2, yTop + 2, x + 2, yTop + 10);
+    u8g2.drawLine(x + 11, yTop + 2, x + 11, yTop + 10);
+  } else if (!strcmp(a, "chatgpt")) {
+    u8g2.drawRFrame(x, yTop + 1, 13, 8, 2);
+    u8g2.drawLine(x + 3, yTop + 9, x + 3, yTop + 11);
+    u8g2.drawLine(x + 3, yTop + 11, x + 6, yTop + 9);
+  } else {
+    u8g2.drawFrame(x, yTop, 11, 11);
+    u8g2.drawLine(x + 2, yTop + 5, x + 8, yTop + 5);
+  }
+}
+
+// icon + short name; returns x after the tag
+int drawAgentTag(int x, int baseline, const char* a) {
+  drawAgentIcon(x, baseline - 10, a);
+  u8g2.setFont(F_ASCII);
+  u8g2.drawStr(x + 17, baseline, agentShort(a));
+  return x + 17 + u8g2.getStrWidth(agentShort(a));
+}
+
 // ---------------- json -> BoardData ----------------
 bool extractData(const String& payload) {
   JsonDocument doc;
@@ -367,8 +403,8 @@ void renderNotifs() {
         u8g2.drawBox(4, y, W - 8, bh);
         u8g2.setDrawColor(0);
         u8g2.setFont(F_ASCII);
-        u8g2.drawStr(12, y + 14, agentShort(nf.agent));
-        int x = 12 + u8g2.getStrWidth(agentShort(nf.agent)) + 8;
+        drawAgentIcon(10, y + 4, nf.agent);
+        int x = 10 + 17 + u8g2.getStrWidth(agentShort(nf.agent)) + 6;
         u8g2.setFont(F_CJK);
         drawClipped(x, y + 14, nf.project, 170);
         u8g2.drawUTF8(230, y + 14, "跑完等你");
@@ -384,8 +420,8 @@ void renderNotifs() {
         if (y + 20 > notifBottom) break;
         u8g2.drawFrame(4, y, W - 8, 20);
         u8g2.setFont(F_ASCII);
-        u8g2.drawStr(12, y + 14, agentShort(nf.agent));
-        int x = 12 + u8g2.getStrWidth(agentShort(nf.agent)) + 8;
+        drawAgentIcon(9, y + 4, nf.agent);
+        int x = 9 + 17 + u8g2.getStrWidth(agentShort(nf.agent)) + 6;
         u8g2.setFont(F_CJK);
         drawClipped(x, y + 14, nf.project, 110);
         x += 116;
@@ -417,19 +453,18 @@ void renderSessions() {
   int rowsLeft = (H - 26 - y) / 19;
   for (int i = 0; i < data.n && rowsLeft > 0; i++, rowsLeft--) {
     Session& s = data.s[i];
-    drawStateGlyph(4, y, s.state);
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(14, y, agentShort(s.agent));
-    int x = 14 + u8g2.getStrWidth(agentShort(s.agent)) + 5;
+    int x = drawAgentTag(4, y, s.agent);
+    x += 5;
     u8g2.setFont(F_CJK);
-    drawClipped(x, y, s.project, 96);
-    x += 100;
+    drawClipped(x, y, s.project, 92);
+    x += 96;
     u8g2.setFont(F_ASCII);
     fmtAge(s.age, buf, sizeof(buf));
     int ageW = u8g2.getStrWidth(buf);
     u8g2.drawStr(W - ageW - 6, y, buf);
+    drawStateGlyph(W - ageW - 22, y, s.state);
     u8g2.setFont(F_CJK);
-    drawClipped(x, y, s.title, W - 6 - ageW - 6 - x);
+    drawClipped(x, y, s.title, W - 28 - ageW - 6 - x);
     y += 19;
   }
 
@@ -451,8 +486,8 @@ void renderModels() {
   for (int i = 0; i < data.nm; i++) {
     if (y > H - 30) break;
     ModelRow& mr = data.model[i];
+    drawAgentTag(4, y, mr.agent);
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(6, y, agentShort(mr.agent));
     u8g2.drawStr(74, y, mr.model);
     char tok[16];
     fmtTokens(mr.tokens, tok, sizeof(tok));
