@@ -54,6 +54,7 @@ struct Notif {
   char project[24];
   char title[64];
   int  age;
+  bool seen;
 };
 struct ModelRow {
   char agent[8];
@@ -194,6 +195,7 @@ bool extractData(const String& payload) {
     strlcpy(nd.notif[i].project, item["project"] | "?", sizeof(nd.notif[i].project));
     strlcpy(nd.notif[i].title, item["title"] | "", sizeof(nd.notif[i].title));
     nd.notif[i].age = item["age"] | 0;
+    nd.notif[i].seen = item["seen"] | false;
     i++;
   }
   nd.nn = i;
@@ -262,142 +264,138 @@ void drawFooter(int activePage) {
   u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 6, buf);
 }
 
-// ---------------- ui: page 0 notifications ----------------
+// quota block shared by the home page (drawn at a fixed y at the bottom)
+void drawQuota(int yTop) {
+  char buf[72];
+  int y = yTop;
+  u8g2.drawHLine(0, y - 6, W);
+  if (data.hasCodex) {
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(4, y + 10, "ChatGPT");
+    u8g2.setFont(F_CJK);
+    snprintf(buf, sizeof(buf), "(%s)", data.gptPlan);
+    u8g2.drawUTF8(50, y + 10, buf);
+    u8g2.setFont(F_ASCII);
+    drawBar(90, y + 2, 64, 9, data.gpt5h);
+    snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
+    u8g2.drawStr(160, y + 10, buf);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(192, y + 10, "5h");
+    u8g2.setFont(F_ASCII);
+    snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
+    u8g2.drawStr(210, y + 10, buf);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(270, y + 10, "每周");
+    u8g2.setFont(F_ASCII);
+    drawBar(296, y + 2, 64, 9, data.gptWeek);
+    snprintf(buf, sizeof(buf), "%.0f%%", data.gptWeek);
+    u8g2.drawStr(366, y + 10, buf);
+    y += 18;
+  }
+  if (data.hasClaude) {
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(4, y + 10, "CLAUDE");
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(46, y + 10, "今日");
+    u8g2.setFont(F_ASCII);
+    char tok[16];
+    fmtTokens(data.claudeTok, tok, sizeof(tok));
+    snprintf(buf, sizeof(buf), "%s tok", tok);
+    u8g2.drawStr(76, y + 10, buf);
+    snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
+    u8g2.drawStr(146, y + 10, buf);
+    snprintf(buf, sizeof(buf), "%d sess", data.claudeSessions);
+    u8g2.drawStr(200, y + 10, buf);
+    y += 16;
+  }
+  if (data.hasPi) {
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(4, y + 10, "PI");
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(24, y + 10, "今日");
+    u8g2.setFont(F_ASCII);
+    char tok[16];
+    fmtTokens(data.piTok, tok, sizeof(tok));
+    snprintf(buf, sizeof(buf), "%s tok", tok);
+    u8g2.drawStr(56, y + 10, buf);
+    snprintf(buf, sizeof(buf), "%d sess", data.piSessions);
+    u8g2.drawStr(126, y + 10, buf);
+  }
+}
+
+// ---------------- ui: page 0 notifications + quota ----------------
 void renderNotifs() {
   u8g2.clearBuffer();
   char buf[72];
   drawHeader();
 
-  u8g2.setFont(F_CJK);
+  // quota block pinned above the footer: codex 18 + claude 16 + pi ~16 + gaps
+  int quotaTop = H - 22 - 18 - 16 - 16 - 8;      // ~ 300-80 = 220
+  int notifBottom = quotaTop - 8;
+
+  int y = 30;
   if (data.nn == 0) {
-    u8g2.drawUTF8(12, 60, "无待处理通知");
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(12, 84, "all agents settled");
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(12, H - 40, "agent 跑完等你输入时，这里会提醒");
+    u8g2.drawUTF8(10, y + 6, "无待处理通知");
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(12, H - 26, "KEY: page / long-press: clear");
-    drawFooter(0);
-    u8g2.sendBuffer();
-    return;
+    u8g2.drawStr(10, y + 24, "agent finished-turn alerts appear here");
   }
 
-  // inverted notification blocks: agent + project + age / title
-  int y = 30;
-  for (int i = 0; i < data.nn; i++) {
+  for (int i = 0; i < data.nn && y < notifBottom; i++) {
     Notif& nf = data.notif[i];
-    int bh = 40;
-    if (y + bh > H - 24) break;
-    u8g2.drawBox(4, y, W - 8, bh);
-    u8g2.setDrawColor(0);
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(12, y + 14, agentShort(nf.agent));
-    int x = 12 + u8g2.getStrWidth(agentShort(nf.agent)) + 8;
-    u8g2.setFont(F_CJK);
-    {
-      static char pb[28];
-      snprintf(pb, sizeof(pb), "%s", nf.project);
-      int maxw = 180;
-      int len = strlen(pb);
-      while (len > 0 && u8g2.getUTF8Width(pb) > maxw) {
-        int k = len - 1;
-        while (k > 0 && (pb[k] & 0xC0) == 0x80) k--;
-        pb[k] = 0; len = k;
-      }
-      u8g2.drawUTF8(x, y + 14, pb);
-      x += u8g2.getUTF8Width(pb) + 10;
+    if (!nf.seen) {
+      // fresh: solid inverted block, two lines
+      int bh = 40;
+      if (y + bh > notifBottom) break;
+      u8g2.drawBox(4, y, W - 8, bh);
+      u8g2.setDrawColor(0);
+      u8g2.setFont(F_ASCII);
+      u8g2.drawStr(12, y + 14, agentShort(nf.agent));
+      int x = 12 + u8g2.getStrWidth(agentShort(nf.agent)) + 8;
+      u8g2.setFont(F_CJK);
+      drawClipped(x, y + 14, nf.project, 170);
+      u8g2.drawUTF8(230, y + 14, "跑完等你");
+      u8g2.setFont(F_ASCII);
+      fmtAge(nf.age, buf, sizeof(buf));
+      u8g2.drawStr(W - u8g2.getStrWidth(buf) - 12, y + 14, buf);
+      u8g2.setFont(F_CJK);
+      drawClipped(12, y + 32, nf.title, W - 24);
+      u8g2.setDrawColor(1);
+      y += bh + 4;
+    } else {
+      // viewed on the computer: outline row, single line
+      if (y + 20 > notifBottom) break;
+      u8g2.drawFrame(4, y, W - 8, 20);
+      u8g2.setFont(F_ASCII);
+      u8g2.drawStr(12, y + 14, agentShort(nf.agent));
+      int x = 12 + u8g2.getStrWidth(agentShort(nf.agent)) + 8;
+      u8g2.setFont(F_CJK);
+      drawClipped(x, y + 14, nf.project, 110);
+      x += 116;
+      u8g2.drawUTF8(x, y + 14, "已读");
+      x += 30;
+      fmtAge(nf.age, buf, sizeof(buf));
+      u8g2.setFont(F_ASCII);
+      int ageW = u8g2.getStrWidth(buf);
+      u8g2.drawStr(W - ageW - 12, y + 14, buf);
+      u8g2.setFont(F_CJK);
+      drawClipped(x, y + 14, nf.title, W - 12 - ageW - 12 - x);
+      y += 24;
     }
-    u8g2.drawUTF8(x, y + 14, "跑完等你");
-    u8g2.setFont(F_ASCII);
-    fmtAge(nf.age, buf, sizeof(buf));
-    u8g2.drawStr(W - u8g2.getStrWidth(buf) - 12, y + 14, buf);
-    u8g2.setFont(F_CJK);
-    {
-      static char tb[80];
-      snprintf(tb, sizeof(tb), "%s", nf.title);
-      int maxw = W - 24;
-      int len = strlen(tb);
-      while (len > 0 && u8g2.getUTF8Width(tb) > maxw) {
-        int k = len - 1;
-        while (k > 0 && (tb[k] & 0xC0) == 0x80) k--;
-        tb[k] = 0; len = k;
-      }
-      u8g2.drawUTF8(12, y + 32, tb);
-    }
-    u8g2.setDrawColor(1);
-    y += bh + 4;
   }
+
+  drawQuota(quotaTop);
   drawFooter(0);
   u8g2.sendBuffer();
 }
 
-// ---------------- ui: page 1 sessions ----------------
+// ---------------- ui: page 1 sessions (list only) ----------------
 void renderSessions() {
   u8g2.clearBuffer();
   char buf[72];
   drawHeader();
 
-  int y = 38;
-  u8g2.setFont(F_ASCII);
-
-  if (data.hasCodex) {
-    u8g2.drawStr(4, y, "ChatGPT");
-    u8g2.setFont(F_CJK);
-    snprintf(buf, sizeof(buf), "(%s)", data.gptPlan);
-    u8g2.drawUTF8(50, y, buf);
-    u8g2.setFont(F_ASCII);
-    drawBar(90, y - 8, 64, 9, data.gpt5h);
-    snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
-    u8g2.drawStr(160, y, buf);
-    u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(192, y, "5h");
-    u8g2.setFont(F_ASCII);
-    snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
-    u8g2.drawStr(210, y, buf);
-    u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(270, y, "每周");
-    u8g2.setFont(F_ASCII);
-    drawBar(296, y - 8, 64, 9, data.gptWeek);
-    snprintf(buf, sizeof(buf), "%.0f%%", data.gptWeek);
-    u8g2.drawStr(366, y, buf);
-    y += 16;
-  }
-
-  if (data.hasClaude) {
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y, "CLAUDE");
-    u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(46, y, "今日");
-    u8g2.setFont(F_ASCII);
-    char tok[16];
-    fmtTokens(data.claudeTok, tok, sizeof(tok));
-    snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(76, y, buf);
-    snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
-    u8g2.drawStr(146, y, buf);
-    snprintf(buf, sizeof(buf), "%d sess", data.claudeSessions);
-    u8g2.drawStr(200, y, buf);
-    y += 14;
-  }
-
-  if (data.hasPi) {
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y, "PI");
-    u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(24, y, "今日");
-    u8g2.setFont(F_ASCII);
-    char tok[16];
-    fmtTokens(data.piTok, tok, sizeof(tok));
-    snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(56, y, buf);
-    snprintf(buf, sizeof(buf), "%d sess", data.piSessions);
-    u8g2.drawStr(126, y, buf);
-    y += 14;
-  }
-
-  u8g2.drawHLine(0, y - 3, W);
-  y += 8;
-
+  int y = 36;
   int rowsLeft = (H - 26 - y) / 19;
   for (int i = 0; i < data.n && rowsLeft > 0; i++, rowsLeft--) {
     Session& s = data.s[i];
@@ -483,7 +481,8 @@ void buildHash(char* out, size_t n) {
     len = strlen(out);
   }
   for (int i = 0; i < data.nn && len < n - 40; i++) {
-    snprintf(out + len, n - len, "N%s%d|%.14s|", data.notif[i].agent, data.notif[i].age / 60,
+    snprintf(out + len, n - len, "N%s%d%d|%.14s|", data.notif[i].agent,
+             data.notif[i].seen ? 1 : 0, data.notif[i].age / 60,
              data.notif[i].title);
     len = strlen(out);
   }

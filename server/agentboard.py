@@ -467,15 +467,19 @@ class Collector:
 
 class NotifStore:
     """Turn-complete notifications: an agent finished working and now waits
-    for input. Cleared by user ack (KEY long-press on the display, or the
-    dashboard button)."""
+    for input. unseen = fresh; seen = the dashboard was opened (viewed on the
+    computer) — display renders those dimmed, they age out after 30 min.
+    Cleared by user ack (KEY long-press on the display, or the dashboard)."""
+
+    SEEN_TTL = 1800          # seen notifications disappear after 30 min
 
     def __init__(self):
         self.items = []
         self.lock = threading.Lock()
         try:
             raw = json.load(open(CFG["notif_file"]))
-            self.items = raw if isinstance(raw, list) else []
+            if isinstance(raw, list):
+                self.items = [n for n in raw if isinstance(n, dict)]
         except Exception:
             pass
 
@@ -485,9 +489,40 @@ class NotifStore:
             self.items = [n for n in self.items
                           if not (n["agent"] == agent and n["project"] == project)]
             self.items.insert(0, {"agent": agent, "project": project,
-                                  "title": title, "ts": int(ts)})
+                                  "title": title, "ts": int(ts),
+                                  "seen": False, "seen_ts": 0})
             self.items = self.items[:CFG["notif_max"]]
             self._save()
+
+    def mark_seen(self):
+        with self.lock:
+            now = int(time.time())
+            changed = False
+            for n in self.items:
+                if not n.get("seen"):
+                    n["seen"] = True
+                    n["seen_ts"] = now
+                    changed = True
+            if changed:
+                self._save()
+
+    def drop_for(self, agent, project):
+        """The session resumed working — its awaiting-input notif is moot."""
+        with self.lock:
+            before = len(self.items)
+            self.items = [n for n in self.items
+                          if not (n["agent"] == agent and n["project"] == project)]
+            if len(self.items) != before:
+                self._save()
+
+    def reap(self):
+        now = time.time()
+        with self.lock:
+            before = len(self.items)
+            self.items = [n for n in self.items
+                          if not (n.get("seen") and now - n.get("seen_ts", 0) > self.SEEN_TTL)]
+            if len(self.items) != before:
+                self._save()
 
     def clear(self):
         with self.lock:
@@ -587,7 +622,8 @@ def build_snapshot(col: Collector):
     col.scan_pi()
     listed = col.tag_states() + col.scan_chatgpt_index()
 
-    # turn-complete notifications: transition running -> idle
+    # turn-complete notifications: transition running -> idle.
+    # idle -> running means the user went back to that agent: drop its notif.
     for st in col.files.values():
         m = st.meta
         if not m.get("agent"):
@@ -602,8 +638,11 @@ def build_snapshot(col: Collector):
             NOTIFS.add(m["agent"], m.get("project") or "?",
                        m.get("summary") or m.get("title") or "(no title)",
                        m.get("last") or time.time())
+        if prev == "idle" and cur == "running":
+            NOTIFS.drop_for(m["agent"], m.get("project") or "?")
         if cur:
             m["prev_state"] = cur
+    NOTIFS.reap()
 
     order = {"running": 0, "idle": 1, "done": 2}
     listed.sort(key=lambda s: (order[s["state"]], -s["last"]))
@@ -838,12 +877,16 @@ function fmtAge(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if
 function fmtT(n){if(n>1e6)return (n/1e6).toFixed(1)+'M';if(n>1e3)return (n/1e3).toFixed(0)+'k';return n}
 function bar(p){const c=p>80?'hot':p>50?'warn':'';return `<div class="bar ${c}"><i style="width:${Math.min(100,p)}%"></i></div> ${p}%`}
 async function tick(){
- const d=await (await fetch('/api/status')).json();
+ const d=await (await fetch('/api/status?seen=1')).json();
  document.getElementById('clock').textContent=`${d.host} · ${d.date} ${d.clock}`;
  let nh='';
  if((d.notifs||[]).length){
-  nh=`<h2>通知 (${d.notifs.length}) <button onclick="fetch('/api/ack',{method:'POST'}).then(tick)" style="float:right">全部清除</button></h2>`;
-  nh+=d.notifs.map(n=>`<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:6px 10px;margin:4px 0">
+  const un=d.notifs.filter(n=>!n.seen).length;
+  nh=`<h2>通知 (${d.notifs.length}${un?` · ${un} 未读`:''}) <button onclick="fetch('/api/ack',{method:'POST'}).then(tick)" style="float:right">全部清除</button></h2>`;
+  nh+=d.notifs.map(n=>n.seen
+   ?`<div style="background:#fff;border:1px dashed #d6d3d1;border-radius:6px;padding:6px 10px;margin:4px 0;color:#78716c">
+   <b>${AG[n.agent]||n.agent}</b> · ${n.project} · ${fmtAge(n.age)}前跑完（已读）<br>${n.title}</div>`
+   :`<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:6px 10px;margin:4px 0">
    <b>${AG[n.agent]||n.agent}</b> · ${n.project} · ${fmtAge(n.age)}前跑完，等你输入<br>${n.title}</div>`).join('');
  } else { nh='<h2>通知</h2><div class=mut>无待处理 ✓</div>'; }
  document.getElementById('notifs').innerHTML=nh;
@@ -877,8 +920,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
         if path == "/api/status":
+            if "seen=1" in query:
+                NOTIFS.mark_seen()      # dashboard open = viewed on the computer
+                PUSH_NOW.set()
             with STATE_LOCK:
                 body = json.dumps(SNAPSHOT, ensure_ascii=False, separators=(",", ":"))
             self._send(200, body.encode("utf-8"), "application/json")
