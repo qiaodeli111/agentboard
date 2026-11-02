@@ -32,13 +32,15 @@ HOME = Path.home()
 
 DEFAULTS = {
     "port": 8899,
-    "run_window_sec": 180,        # last write / live process  -> running
-    "idle_window_sec": 3600,      # within an hour, no process -> idle
+    "run_window_sec": 60,         # file written within this -> actively working
+    "idle_window_sec": 3600,      # within an hour -> waiting / idle
     "history_hours": 24,          # ignore sessions older than this
     "max_sessions_per_agent": 6,
     "max_sessions_total": 14,
     "chatgpt_threads": 4,
     "scan_interval_sec": 5,
+    "notif_file": str(HOME / "agentboard" / "server" / "notifs.json"),
+    "notif_max": 20,
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -240,6 +242,9 @@ class Collector:
                     m["tok_today"] = m.get("tok_today", 0) + tin + tout + cr + cw
                     c = cost_of(m.get("model"), tin, tout, cr, cw)
                     m["cost_today"] = m.get("cost_today", 0.0) + (c or 0.0)
+                    mdl = msg.get("model") or "?"
+                    models = m.setdefault("models", {})
+                    models[mdl] = models.get(mdl, 0) + tin + tout + cr + cw
                 m["turns"] = m.get("turns", 0) + 1
             elif t == "user":
                 if not m.get("title"):
@@ -305,8 +310,26 @@ class Collector:
                 info = p.get("info") or {}
                 tot = info.get("total_token_usage") or {}
                 if tot:
-                    m["tokens"] = tot.get("input_tokens", 0) + tot.get("output_tokens", 0) \
+                    total = tot.get("input_tokens", 0) + tot.get("output_tokens", 0) \
                         + tot.get("cached_input_tokens", 0)
+                    m["tokens"] = total
+                    if "last_total" not in m:
+                        # first sight: baseline. If the whole session began
+                        # today, its full usage counts as today's.
+                        m["last_total"] = total
+                        if (m.get("started") or 0) >= self.today and total:
+                            m["tok_today"] = m.get("tok_today", 0) + total
+                            mdl = m.get("model") or "?"
+                            md = m.setdefault("models", {})
+                            md[mdl] = md.get(mdl, 0) + total
+                    elif total > m["last_total"]:
+                        delta = total - m["last_total"]
+                        m["last_total"] = total
+                        if ts and ts >= self.today:
+                            m["tok_today"] = m.get("tok_today", 0) + delta
+                            mdl = m.get("model") or "?"
+                            md = m.setdefault("models", {})
+                            md[mdl] = md.get(mdl, 0) + delta
                 rl = p.get("rate_limits")
                 if rl and ts:
                     prev = Collector.quota_codex
@@ -368,6 +391,9 @@ class Collector:
                     mts = ts or iso_ts(str(msg.get("timestamp") or ""))
                     if mts and mts >= self.today:
                         m["tok_today"] = m.get("tok_today", 0) + tin + tout
+                        mdl = m.get("model") or "?"
+                        models = m.setdefault("models", {})
+                        models[mdl] = models.get(mdl, 0) + tin + tout
         m.setdefault("agent", "pi")
         m.setdefault("project", slug_to_project(slug))
         m.setdefault("id", path.stem)
@@ -403,8 +429,11 @@ class Collector:
         return out
 
     # ---- states ----
+    # running = session file written to recently (agent actively working)
+    # idle    = quiet for a while, process may still be alive (waiting for input)
+    # done    = quiet for over an hour
 
-    def tag_states(self, proc_projects):
+    def tag_states(self):
         now = time.time()
         run_w = CFG["run_window_sec"]
         idle_w = CFG["idle_window_sec"]
@@ -417,8 +446,7 @@ class Collector:
             last = m.get("last") or m.get("started") or 0
             if last < cutoff:
                 continue
-            live = m.get("project") in proc_projects
-            if live or now - last <= run_w:
+            if now - last <= run_w:
                 state = "running"
             elif now - last <= idle_w:
                 state = "idle"
@@ -433,6 +461,55 @@ class Collector:
                 "originator": m.get("originator"),
             })
         return keep
+
+
+# ------------------------------------------------------------ notifications
+
+class NotifStore:
+    """Turn-complete notifications: an agent finished working and now waits
+    for input. Cleared by user ack (KEY long-press on the display, or the
+    dashboard button)."""
+
+    def __init__(self):
+        self.items = []
+        self.lock = threading.Lock()
+        try:
+            raw = json.load(open(CFG["notif_file"]))
+            self.items = raw if isinstance(raw, list) else []
+        except Exception:
+            pass
+
+    def add(self, agent, project, title, ts):
+        with self.lock:
+            # replace an older notif for the same project+agent
+            self.items = [n for n in self.items
+                          if not (n["agent"] == agent and n["project"] == project)]
+            self.items.insert(0, {"agent": agent, "project": project,
+                                  "title": title, "ts": int(ts)})
+            self.items = self.items[:CFG["notif_max"]]
+            self._save()
+
+    def clear(self):
+        with self.lock:
+            n = len(self.items)
+            self.items = []
+            self._save()
+            return n
+
+    def snapshot(self):
+        now = time.time()
+        with self.lock:
+            return [{**n, "age": int(now - n["ts"])} for n in self.items]
+
+    def _save(self):
+        try:
+            json.dump(self.items, open(CFG["notif_file"], "w"), ensure_ascii=False)
+        except Exception:
+            pass
+
+
+NOTIFS = NotifStore()
+PUSH_NOW = threading.Event()      # set to push a frame to the display immediately
 
 
 # ------------------------------------------------------------- processes
@@ -505,17 +582,28 @@ def build_snapshot(col: Collector):
     col.rollover_check()
     counts, cwd_map, flags = classify_procs()
 
-    by_proj = {}                                    # project basename -> agents live there
-    for cwd, agent in cwd_map.items():
-        by_proj.setdefault(project_from_cwd(cwd), set()).add(agent)
-
     col.scan_claude()
     col.scan_codex()
     col.scan_pi()
-    listed = col.tag_states(by_proj) + col.scan_chatgpt_index()
+    listed = col.tag_states() + col.scan_chatgpt_index()
 
-    for s in listed:
-        s["live_agents"] = sorted(by_proj.get(s["project"], set()))
+    # turn-complete notifications: transition running -> idle
+    for st in col.files.values():
+        m = st.meta
+        if not m.get("agent"):
+            continue
+        prev = m.get("prev_state")
+        cur = None
+        for s in listed:
+            if s["id"] == m.get("id"):
+                cur = s["state"]
+                break
+        if prev == "running" and cur == "idle":
+            NOTIFS.add(m["agent"], m.get("project") or "?",
+                       m.get("summary") or m.get("title") or "(no title)",
+                       m.get("last") or time.time())
+        if cur:
+            m["prev_state"] = cur
 
     order = {"running": 0, "idle": 1, "done": 2}
     listed.sort(key=lambda s: (order[s["state"]], -s["last"]))
@@ -529,6 +617,18 @@ def build_snapshot(col: Collector):
     shown.sort(key=lambda s: (order[s["state"]], -s["last"]))
     shown = shown[:CFG["max_sessions_total"]]
 
+    # ---- per-model usage today, across agents ----
+    model_rows = {}
+    for st in col.files.values():
+        m = st.meta
+        if not m.get("models"):
+            continue
+        for mdl, tok in m["models"].items():
+            key = (m["agent"], mdl)
+            model_rows[key] = model_rows.get(key, 0) + tok
+    models = [{"agent": a, "model": mdl, "tokens": int(t)}
+              for (a, mdl), t in sorted(model_rows.items(), key=lambda kv: -kv[1])][:12]
+
     # ---- quota: codex (ChatGPT account) + claude local stats ----
     quota = {}
     q = Collector.quota_codex
@@ -541,7 +641,7 @@ def build_snapshot(col: Collector):
         }
     tok = cost = 0.0
     n_today = 0
-    models = {}
+    claude_models = {}
     for st in col.files.values():
         m = st.meta
         if m.get("agent") != "claude":
@@ -553,11 +653,11 @@ def build_snapshot(col: Collector):
             tok += t
             cost += m.get("cost_today", 0.0)
             mdl = m.get("model") or "?"
-            models[mdl] = models.get(mdl, 0) + t
+            claude_models[mdl] = claude_models.get(mdl, 0) + t
     quota["claude"] = {
         "today_tokens": int(tok), "today_cost": round(cost, 2),
         "sessions_today": n_today,
-        "by_model": sorted(models.items(), key=lambda kv: -kv[1])[:3],
+        "by_model": sorted(claude_models.items(), key=lambda kv: -kv[1])[:3],
         "note": "estimate",
     }
     pi_tok = 0
@@ -585,6 +685,8 @@ def build_snapshot(col: Collector):
         "shown": shown,
         "agents": {k: v for k, v in sorted(per_agent.items())},
         "quota": quota,
+        "models": models,
+        "notifs": NOTIFS.snapshot(),
         "procs": {**counts, **flags},
     }
 
@@ -592,11 +694,16 @@ def build_snapshot(col: Collector):
 def refresher():
     col = Collector()
     global SNAPSHOT
+    prev_notifs = 0
     while True:
         try:
             snap = build_snapshot(col)
             with STATE_LOCK:
                 SNAPSHOT = snap
+            n = len(snap.get("notifs") or [])
+            if n > prev_notifs:
+                PUSH_NOW.set()          # new notification: wake the pusher
+            prev_notifs = n
         except Exception as e:
             print(f"[agentboard] refresh error: {e}", flush=True)
         time.sleep(CFG["scan_interval_sec"])
@@ -610,7 +717,7 @@ SERIAL_GLOBS = ["/dev/cu.usbmodem*"]
 def wire_payload(snap):
     """Trimmed snapshot for the display (it only uses these keys)."""
     w = {k: snap[k] for k in ("generated_at", "clock", "date", "host",
-                              "shown", "quota", "procs") if k in snap}
+                              "shown", "quota", "procs", "models", "notifs") if k in snap}
     return json.dumps(w, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
 
 
@@ -622,57 +729,86 @@ def find_serial_device():
     return None
 
 
-def push_serial(payload: bytes):
-    """Open the CDC serial port, configure raw 8N1, write one JSON line."""
-    dev = find_serial_device()
-    if not dev:
-        return False
-    try:
-        fd = os.open(dev, os.O_RDWR | os.O_NOCTTY)     # blocking: flow-controlled
-    except OSError:
-        return False
-    try:
-        attrs = termios.tcgetattr(fd)
-        iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
-        iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP |
-                   termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
-        oflag &= ~termios.OPOST
-        lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG |
-                   termios.IEXTEN)
-        cflag &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB)
-        cflag |= termios.CS8 | termios.CLOCAL | termios.CREAD
-        crtscts = getattr(termios, "CRTSCTS", 0)
-        cflag &= ~crtscts
-        cc[termios.VMIN] = 0
-        cc[termios.VTIME] = 0
-        for name in ("B115200",):
-            ispeed = ospeed = getattr(termios, name)
-        termios.tcsetattr(fd, termios.TCSANOW,
-                          [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
-        os.write(fd, payload)
-        return True
-    except OSError:
-        return False
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+def open_serial(dev):
+    """Open the CDC device raw 8N1, VMIN=0/VTIME=0 (reads never block)."""
+    fd = os.open(dev, os.O_RDWR | os.O_NOCTTY)
+    attrs = termios.tcgetattr(fd)
+    iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
+    iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP |
+               termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
+    oflag &= ~termios.OPOST
+    lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG |
+               termios.IEXTEN)
+    cflag &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB)
+    cflag |= termios.CS8 | termios.CLOCAL | termios.CREAD
+    cflag &= ~getattr(termios, "CRTSCTS", 0)
+    cc[termios.VMIN] = 0
+    cc[termios.VTIME] = 0
+    speed = getattr(termios, "B115200", None)
+    if speed:
+        ispeed = ospeed = speed
+    termios.tcsetattr(fd, termios.TCSANOW, [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+    return fd
 
 
 def serial_pusher():
+    """Keep the CDC port open, push a JSON frame every ~10s (or when woken),
+    and read back ACK lines from the display's KEY button."""
     global SNAPSHOT
+    fd = None
+    rx = b""
+    last_push = 0.0
     while True:
         try:
-            with STATE_LOCK:
-                snap = SNAPSHOT
-            if snap.get("generated_at"):
-                ok = push_serial(wire_payload(snap))
-                if not ok:
-                    time.sleep(2)     # no device / busy: retry soon
+            if fd is None:
+                dev = find_serial_device()
+                if dev:
+                    try:
+                        fd = open_serial(dev)
+                        print(f"[agentboard] serial open: {dev}", flush=True)
+                    except OSError:
+                        fd = None
+            if fd is not None:
+                # read any ACK lines (never blocks: VMIN=0/VTIME=0)
+                try:
+                    chunk = os.read(fd, 4096)
+                    if chunk:
+                        rx += chunk
+                        while b"\n" in rx:
+                            line, rx = rx.split(b"\n", 1)
+                            if line.strip() in (b"ACK", b"ack"):
+                                n = NOTIFS.clear()
+                                print(f"[agentboard] display ACK, cleared {n} notifs",
+                                      flush=True)
+                                with STATE_LOCK:
+                                    snap = SNAPSHOT
+                                if snap.get("generated_at"):
+                                    os.write(fd, wire_payload(snap))
+                                last_push = time.time()
+                except OSError:
+                    os.close(fd)
+                    fd = None
+                # periodic push
+                if fd is not None and time.time() - last_push >= CFG.get("push_interval_sec", 10):
+                    with STATE_LOCK:
+                        snap = SNAPSHOT
+                    if snap.get("generated_at"):
+                        try:
+                            os.write(fd, wire_payload(snap))
+                        except OSError:
+                            os.close(fd)
+                            fd = None
+                    last_push = time.time()
         except Exception as e:
             print(f"[agentboard] serial push error: {e}", flush=True)
-        time.sleep(CFG.get("push_interval_sec", 10))
+            try:
+                if fd is not None:
+                    os.close(fd)
+            except OSError:
+                pass
+            fd = None
+        PUSH_NOW.wait(timeout=2)
+        PUSH_NOW.clear()
 
 
 DASHBOARD = """<!doctype html><html lang=zh><meta charset=utf-8>
@@ -690,6 +826,7 @@ DASHBOARD = """<!doctype html><html lang=zh><meta charset=utf-8>
  .mut{color:#78716c;font-size:12px}
 </style>
 <h1>AgentBoard <span id=clock class=mut></span></h1>
+<div id=notifs></div>
 <div id=quota></div>
 <h2>会话</h2>
 <table id=t></table>
@@ -703,7 +840,15 @@ function bar(p){const c=p>80?'hot':p>50?'warn':'';return `<div class="bar ${c}">
 async function tick(){
  const d=await (await fetch('/api/status')).json();
  document.getElementById('clock').textContent=`${d.host} · ${d.date} ${d.clock}`;
+ let nh='';
+ if((d.notifs||[]).length){
+  nh=`<h2>通知 (${d.notifs.length}) <button onclick="fetch('/api/ack',{method:'POST'}).then(tick)" style="float:right">全部清除</button></h2>`;
+  nh+=d.notifs.map(n=>`<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:6px 10px;margin:4px 0">
+   <b>${AG[n.agent]||n.agent}</b> · ${n.project} · ${fmtAge(n.age)}前跑完，等你输入<br>${n.title}</div>`).join('');
+ } else { nh='<h2>通知</h2><div class=mut>无待处理 ✓</div>'; }
+ document.getElementById('notifs').innerHTML=nh;
  let q=d.quota||{};let h='';
+ if(q.models&&q.models.length){h+=`<h2>今日模型用量</h2>`+q.models.map(m=>`<div>${AG[m.agent]||m.agent} <code>${m.model||'?'}</code> — ${fmtT(m.tokens)} tok</div>`).join('')+'<div style="height:8px"></div>';}
  if(q.codex){const c=q.codex;h+=`<h2>ChatGPT 额度 (${c.plan||'?'})</h2>`;
   if(c.primary)h+=`<div>5h 窗口 ${bar(c.primary.used_percent)} <span class=mut>重置 ${new Date(c.primary.resets_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span></div>`;
   if(c.secondary)h+=`<div>每周 ${bar(c.secondary.used_percent)}</div>`;}
@@ -741,6 +886,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, DASHBOARD.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/healthz":
             self._send(200, b"ok", "text/plain")
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):
+        if self.path.split("?")[0] == "/api/ack":
+            n = NOTIFS.clear()
+            PUSH_NOW.set()
+            self._send(200, json.dumps({"cleared": n}).encode(), "application/json")
         else:
             self._send(404, b"not found", "text/plain")
 

@@ -6,6 +6,9 @@
 //                  to /dev/cu.usbmodem* (default; works without any network)
 //   USE_WIFI 1  -> the ESP32 polls GET http://BOARD_HOST:BOARD_PORT/api/status
 //
+// Pages (KEY button GPIO18, short press = next page, long press = clear notifs):
+//   0 notifications   1 all sessions   2 per-model token usage
+//
 // Compile FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc
 
 #define USE_WIFI 0   // 0 = USB serial push (default), 1 = ESP polls over WiFi
@@ -27,13 +30,17 @@ U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(U8G2_R1, /*cs=*/40, /*dc=*/5, /*reset=*/41)
 
 #define W 400
 #define H 300
+#define KEY_PIN 18                  // board KEY button (pullup, pressed = LOW)
 
 #define F_HEAD  u8g2_font_9x15B_tr
 #define F_ASCII u8g2_font_6x10_tr
 #define F_CJK   u8g2_font_wqy12_t_gb2312
 
 // ---------------- data ----------------
-constexpr int MAX_SESSIONS = 10;
+constexpr int MAX_SESSIONS = 12;
+constexpr int MAX_NOTIFS = 8;
+constexpr int MAX_MODELS = 12;
+
 struct Session {
   char agent[8];
   char state[8];
@@ -42,18 +49,33 @@ struct Session {
   char model[16];
   int  age;
 };
+struct Notif {
+  char agent[8];
+  char project[24];
+  char title[64];
+  int  age;
+};
+struct ModelRow {
+  char agent[8];
+  char model[24];
+  double tokens;
+};
 struct BoardData {
   char clock[8];
   char host[24];
   int  n;
   Session s[MAX_SESSIONS];
+  int  nn;
+  Notif notif[MAX_NOTIFS];
+  int  nm;
+  ModelRow model[MAX_MODELS];
   bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; char gptPlan[8];
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
   bool hasPi; float piTok; int piSessions;
   int procClaude, procCodex, procPi; bool chatgptApp;
 };
 BoardData data;
-uint32_t lastDataMs = 0;        // millis() of last successful parse
+uint32_t lastDataMs = 0;
 
 #if USE_WIFI
 const uint32_t POLL_MS = 10000;
@@ -61,6 +83,8 @@ const uint32_t REPAINT_MS = 60000;
 uint32_t lastPoll = 0, lastPaint = 0;
 String lastHash;
 #endif
+
+int page = 0;                       // 0 notifs, 1 sessions, 2 models
 
 // ---------------- helpers ----------------
 const char* agentShort(const char* a) {
@@ -78,19 +102,19 @@ void fmtAge(int sec, char* out, size_t n) {
   else                  snprintf(out, n, "%dd", sec / 86400);
 }
 
-void fmtTokens(float v, char* out, size_t n) {
-  if (v >= 1e6)      snprintf(out, n, "%.1fM", v / 1e6);
+void fmtTokens(double v, char* out, size_t n) {
+  if (v >= 1e9)      snprintf(out, n, "%.2fG", v / 1e9);
+  else if (v >= 1e6) snprintf(out, n, "%.1fM", v / 1e6);
   else if (v >= 1e3) snprintf(out, n, "%.0fk", v / 1e3);
   else               snprintf(out, n, "%d", (int)v);
 }
 
-// draw UTF-8 string, trimming whole codepoints until it fits maxW
 void drawClipped(int x, int y, const char* s, int maxW) {
   static char buf[96];
   snprintf(buf, sizeof(buf), "%s", s);
   int len = strlen(buf);
   while (len > 0 && u8g2.getUTF8Width(buf) > maxW) {
-    int i = len - 1;                       // start of the last codepoint
+    int i = len - 1;
     while (i > 0 && (buf[i] & 0xC0) == 0x80) i--;
     buf[i] = 0;
     len = i;
@@ -153,8 +177,7 @@ bool extractData(const String& payload) {
   int i = 0;
   for (JsonObject item : doc["shown"].as<JsonArray>()) {
     if (i >= MAX_SESSIONS) break;
-    const char* a = item["agent"] | "?";
-    strlcpy(nd.s[i].agent, a, sizeof(nd.s[i].agent));
+    strlcpy(nd.s[i].agent, item["agent"] | "?", sizeof(nd.s[i].agent));
     strlcpy(nd.s[i].state, item["state"] | "?", sizeof(nd.s[i].state));
     strlcpy(nd.s[i].project, item["project"] | "?", sizeof(nd.s[i].project));
     strlcpy(nd.s[i].title, item["title"] | "", sizeof(nd.s[i].title));
@@ -164,17 +187,35 @@ bool extractData(const String& payload) {
   }
   nd.n = i;
 
+  i = 0;
+  for (JsonObject item : doc["notifs"].as<JsonArray>()) {
+    if (i >= MAX_NOTIFS) break;
+    strlcpy(nd.notif[i].agent, item["agent"] | "?", sizeof(nd.notif[i].agent));
+    strlcpy(nd.notif[i].project, item["project"] | "?", sizeof(nd.notif[i].project));
+    strlcpy(nd.notif[i].title, item["title"] | "", sizeof(nd.notif[i].title));
+    nd.notif[i].age = item["age"] | 0;
+    i++;
+  }
+  nd.nn = i;
+
+  i = 0;
+  for (JsonObject item : doc["models"].as<JsonArray>()) {
+    if (i >= MAX_MODELS) break;
+    strlcpy(nd.model[i].agent, item["agent"] | "?", sizeof(nd.model[i].agent));
+    strlcpy(nd.model[i].model, item["model"] | "?", sizeof(nd.model[i].model));
+    nd.model[i].tokens = (double)(item["tokens"] | 0);
+    i++;
+  }
+  nd.nm = i;
+
   data = nd;
   lastDataMs = millis();
   return true;
 }
 
-// ---------------- ui ----------------
-void render() {
-  u8g2.clearBuffer();
-  char buf[72];
-
-  // ---- header ----
+// ---------------- ui: shared header/footer ----------------
+void drawHeader() {
+  char buf[64];
   u8g2.setFont(F_HEAD);
   u8g2.drawUTF8(4, 15, "AgentBoard");
   u8g2.setFont(F_ASCII);
@@ -183,11 +224,123 @@ void render() {
     u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, 15, buf);
   }
   u8g2.drawHLine(0, 20, W);
+}
 
-  // ---- quota row 1: ChatGPT 5h + weekly, side by side ----
-  int y = 38;
-  if (data.hasCodex) {
+void drawFooter(int activePage) {
+  char buf[72];
+  u8g2.setFont(F_ASCII);
+  u8g2.drawHLine(0, H - 20, W);
+  // page tabs, active one inverted
+  const char* tabs[3] = {"1 通知", "2 会话", "3 模型"};
+  int x = 6;
+  for (int i = 0; i < 3; i++) {
+    u8g2.setFont(F_CJK);
+    int w = u8g2.getUTF8Width(tabs[i]) + 8;
+    if (i == activePage) {
+      u8g2.drawBox(x, H - 19, w, 19);
+      u8g2.setDrawColor(0);
+      u8g2.drawUTF8(x + 4, H - 6, tabs[i]);
+      u8g2.setDrawColor(1);
+    } else {
+      u8g2.drawUTF8(x + 4, H - 6, tabs[i]);
+    }
+    x += w + 6;
+  }
+  // right side: counts
+  u8g2.setFont(F_ASCII);
+  if (activePage == 1) {
+    int nRun = 0, nIdle = 0;
+    for (int i = 0; i < data.n; i++) {
+      if (!strcmp(data.s[i].state, "running")) nRun++;
+      else if (!strcmp(data.s[i].state, "idle")) nIdle++;
+    }
+    snprintf(buf, sizeof(buf), "run %d idle %d", nRun, nIdle);
+  } else {
+    snprintf(buf, sizeof(buf), "c%d x%d p%d %s", data.procClaude, data.procCodex,
+             data.procPi, data.chatgptApp ? "GPT.app" : "");
+  }
+  u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 6, buf);
+}
+
+// ---------------- ui: page 0 notifications ----------------
+void renderNotifs() {
+  u8g2.clearBuffer();
+  char buf[72];
+  drawHeader();
+
+  u8g2.setFont(F_CJK);
+  if (data.nn == 0) {
+    u8g2.drawUTF8(12, 60, "无待处理通知");
     u8g2.setFont(F_ASCII);
+    u8g2.drawStr(12, 84, "all agents settled");
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(12, H - 40, "agent 跑完等你输入时，这里会提醒");
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(12, H - 26, "KEY: page / long-press: clear");
+    drawFooter(0);
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // inverted notification blocks: agent + project + age / title
+  int y = 30;
+  for (int i = 0; i < data.nn; i++) {
+    Notif& nf = data.notif[i];
+    int bh = 40;
+    if (y + bh > H - 24) break;
+    u8g2.drawBox(4, y, W - 8, bh);
+    u8g2.setDrawColor(0);
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(12, y + 14, agentShort(nf.agent));
+    int x = 12 + u8g2.getStrWidth(agentShort(nf.agent)) + 8;
+    u8g2.setFont(F_CJK);
+    {
+      static char pb[28];
+      snprintf(pb, sizeof(pb), "%s", nf.project);
+      int maxw = 180;
+      int len = strlen(pb);
+      while (len > 0 && u8g2.getUTF8Width(pb) > maxw) {
+        int k = len - 1;
+        while (k > 0 && (pb[k] & 0xC0) == 0x80) k--;
+        pb[k] = 0; len = k;
+      }
+      u8g2.drawUTF8(x, y + 14, pb);
+      x += u8g2.getUTF8Width(pb) + 10;
+    }
+    u8g2.drawUTF8(x, y + 14, "跑完等你");
+    u8g2.setFont(F_ASCII);
+    fmtAge(nf.age, buf, sizeof(buf));
+    u8g2.drawStr(W - u8g2.getStrWidth(buf) - 12, y + 14, buf);
+    u8g2.setFont(F_CJK);
+    {
+      static char tb[80];
+      snprintf(tb, sizeof(tb), "%s", nf.title);
+      int maxw = W - 24;
+      int len = strlen(tb);
+      while (len > 0 && u8g2.getUTF8Width(tb) > maxw) {
+        int k = len - 1;
+        while (k > 0 && (tb[k] & 0xC0) == 0x80) k--;
+        tb[k] = 0; len = k;
+      }
+      u8g2.drawUTF8(12, y + 32, tb);
+    }
+    u8g2.setDrawColor(1);
+    y += bh + 4;
+  }
+  drawFooter(0);
+  u8g2.sendBuffer();
+}
+
+// ---------------- ui: page 1 sessions ----------------
+void renderSessions() {
+  u8g2.clearBuffer();
+  char buf[72];
+  drawHeader();
+
+  int y = 38;
+  u8g2.setFont(F_ASCII);
+
+  if (data.hasCodex) {
     u8g2.drawStr(4, y, "ChatGPT");
     u8g2.setFont(F_CJK);
     snprintf(buf, sizeof(buf), "(%s)", data.gptPlan);
@@ -201,7 +354,6 @@ void render() {
     u8g2.setFont(F_ASCII);
     snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
     u8g2.drawStr(210, y, buf);
-    // weekly on the right half
     u8g2.setFont(F_CJK);
     u8g2.drawUTF8(270, y, "每周");
     u8g2.setFont(F_ASCII);
@@ -211,43 +363,41 @@ void render() {
     y += 16;
   }
 
-  // ---- quota row 2: Claude today + pi today on one line ----
-  if (data.hasClaude || data.hasPi) {
+  if (data.hasClaude) {
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(4, y, "CLAUDE");
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(46, y, "今日");
+    u8g2.setFont(F_ASCII);
     char tok[16];
-    int x = 4;
-    if (data.hasClaude) {
-      u8g2.setFont(F_ASCII);
-      u8g2.drawStr(x, y, "CLAUDE");  x += 42;
-      u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(x, y, "今日");   x += 28;
-      u8g2.setFont(F_ASCII);
-      fmtTokens(data.claudeTok, tok, sizeof(tok));
-      snprintf(buf, sizeof(buf), "%s tok", tok);
-      u8g2.drawStr(x, y, buf);       x += 62;
-      snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
-      u8g2.drawStr(x, y, buf);       x += 44;
-      snprintf(buf, sizeof(buf), "%ds", data.claudeSessions);
-      u8g2.drawStr(x, y, buf);       x += 30;
-    }
-    if (data.hasPi) {
-      u8g2.setFont(F_ASCII);
-      u8g2.drawStr(x + 8, y, "PI");  x += 28;
-      u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(x, y, "今日");   x += 28;
-      u8g2.setFont(F_ASCII);
-      fmtTokens(data.piTok, tok, sizeof(tok));
-      snprintf(buf, sizeof(buf), "%s tok", tok);
-      u8g2.drawStr(x, y, buf);       x += 62;
-      snprintf(buf, sizeof(buf), "%ds", data.piSessions);
-      u8g2.drawStr(x, y, buf);
-    }
-    y += 12;
+    fmtTokens(data.claudeTok, tok, sizeof(tok));
+    snprintf(buf, sizeof(buf), "%s tok", tok);
+    u8g2.drawStr(76, y, buf);
+    snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
+    u8g2.drawStr(146, y, buf);
+    snprintf(buf, sizeof(buf), "%d sess", data.claudeSessions);
+    u8g2.drawStr(200, y, buf);
+    y += 14;
+  }
+
+  if (data.hasPi) {
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(4, y, "PI");
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(24, y, "今日");
+    u8g2.setFont(F_ASCII);
+    char tok[16];
+    fmtTokens(data.piTok, tok, sizeof(tok));
+    snprintf(buf, sizeof(buf), "%s tok", tok);
+    u8g2.drawStr(56, y, buf);
+    snprintf(buf, sizeof(buf), "%d sess", data.piSessions);
+    u8g2.drawStr(126, y, buf);
+    y += 14;
   }
 
   u8g2.drawHLine(0, y - 3, W);
   y += 8;
 
-  // ---- sessions: one line each ----
   int rowsLeft = (H - 26 - y) / 19;
   for (int i = 0; i < data.n && rowsLeft > 0; i++, rowsLeft--) {
     Session& s = data.s[i];
@@ -258,50 +408,62 @@ void render() {
     u8g2.setFont(F_CJK);
     drawClipped(x, y, s.project, 96);
     x += 100;
-    // age right-aligned
     u8g2.setFont(F_ASCII);
     fmtAge(s.age, buf, sizeof(buf));
     int ageW = u8g2.getStrWidth(buf);
     u8g2.drawStr(W - ageW - 6, y, buf);
-    // title fills the middle
     u8g2.setFont(F_CJK);
     drawClipped(x, y, s.title, W - 6 - ageW - 6 - x);
     y += 19;
   }
 
-  // ---- footer ----
-  u8g2.setFont(F_ASCII);
-  u8g2.drawHLine(0, H - 20, W);
-  int nRun = 0, nIdle = 0;
-  for (int i = 0; i < data.n; i++) {
-    if (!strcmp(data.s[i].state, "running")) nRun++;
-    else if (!strcmp(data.s[i].state, "idle")) nIdle++;
-  }
-  if (!lastDataMs) {
-    u8g2.setFont(F_CJK);
-#if USE_WIFI
-    u8g2.drawUTF8(4, H - 6, "等待网络数据...");
-#else
-    u8g2.drawUTF8(4, H - 6, "USB 等待数据...");
-#endif
-  } else {
-    u8g2.setFont(F_CJK);
-    snprintf(buf, sizeof(buf), "跑%d 闲%d", nRun, nIdle);
-    u8g2.drawUTF8(4, H - 6, buf);
-    int w = u8g2.getUTF8Width(buf);
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4 + w + 8, H - 6, data.clock);
-  }
-  u8g2.setFont(F_ASCII);
-  snprintf(buf, sizeof(buf), "c%d x%d p%d %s", data.procClaude, data.procCodex,
-           data.procPi, data.chatgptApp ? "GPT.app" : "");
-  u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 6, buf);
-
+  drawFooter(1);
   u8g2.sendBuffer();
 }
 
-// cheap change detection: the panel is reflective, redraws are cheap, but
-// skipping identical frames avoids flicker and saves power
+// ---------------- ui: page 2 model usage ----------------
+void renderModels() {
+  u8g2.clearBuffer();
+  char buf[72];
+  drawHeader();
+
+  u8g2.setFont(F_CJK);
+  u8g2.drawUTF8(4, 36, "今日各模型 token 用量");
+  u8g2.drawHLine(0, 42, W);
+
+  int y = 58;
+  for (int i = 0; i < data.nm; i++) {
+    if (y > H - 30) break;
+    ModelRow& mr = data.model[i];
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(6, y, agentShort(mr.agent));
+    u8g2.drawStr(74, y, mr.model);
+    char tok[16];
+    fmtTokens(mr.tokens, tok, sizeof(tok));
+    snprintf(buf, sizeof(buf), "%s tok", tok);
+    u8g2.drawStr(W - u8g2.getStrWidth(buf) - 8, y, buf);
+    // proportional bar under the row
+    if (data.model[0].tokens > 0) {
+      drawBar(74, y + 2, 180, 5, mr.tokens / data.model[0].tokens * 100.0f);
+    }
+    y += 18;
+  }
+  if (data.nm == 0) {
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(12, 70, "今日暂无用量数据");
+  }
+  drawFooter(2);
+  u8g2.sendBuffer();
+}
+
+void render() {
+  switch (page) {
+    case 0: renderNotifs(); break;
+    case 1: renderSessions(); break;
+    default: renderModels(); break;
+  }
+}
+
 bool renderIfChanged(const char* newHash) {
   static char lastHash[512] = "";
   if (strcmp(lastHash, newHash) == 0) return false;
@@ -311,21 +473,49 @@ bool renderIfChanged(const char* newHash) {
 }
 
 void buildHash(char* out, size_t n) {
-  snprintf(out, n, "%s|%.0f|%.0f|%d|%d|%d|%d|", data.clock, data.gpt5h, data.gptWeek,
-           (int)data.claudeTok, data.claudeSessions, data.procClaude + data.procCodex + data.procPi,
-           data.chatgptApp);
+  snprintf(out, n, "%d|%s|%.0f|%.0f|%d|%d|%d|", page, data.clock, data.gpt5h, data.gptWeek,
+           (int)data.claudeTok, (int)data.piTok,
+           data.procClaude + data.procCodex + data.procPi);
   size_t len = strlen(out);
   for (int i = 0; i < data.n && len < n - 40; i++) {
     snprintf(out + len, n - len, "%s%d|%.14s|", data.s[i].state, data.s[i].age / 60,
              data.s[i].title);
     len = strlen(out);
   }
+  for (int i = 0; i < data.nn && len < n - 40; i++) {
+    snprintf(out + len, n - len, "N%s%d|%.14s|", data.notif[i].agent, data.notif[i].age / 60,
+             data.notif[i].title);
+    len = strlen(out);
+  }
+}
+
+// ---------------- button ----------------
+void handleButton() {
+  static uint32_t pressStart = 0;
+  static bool longFired = false;
+  bool pressed = digitalRead(KEY_PIN) == LOW;
+  uint32_t now = millis();
+
+  if (pressed && pressStart == 0) {
+    pressStart = now;
+    longFired = false;
+  } else if (pressed && pressStart && !longFired && now - pressStart > 800) {
+    longFired = true;
+    Serial.print("ACK\n");          // tell the Mac to clear notifications
+    if (lastDataMs) render();       // repaint immediately (notifs may clear next push)
+  } else if (!pressed && pressStart) {
+    if (!longFired && now - pressStart > 30 && now - pressStart < 800) {
+      page = (page + 1) % 3;
+      if (lastDataMs) render();
+    }
+    pressStart = 0;
+  }
 }
 
 // ---------------- setup / loop ----------------
 #if USE_WIFI
 bool wifiUp() { return WiFi.status() == WL_CONNECTED; }
-
+String httpBody;
 bool fetchStatus() {
   if (!wifiUp()) return false;
   HTTPClient http;
@@ -344,6 +534,7 @@ bool fetchStatus() {
 void setup() {
   Serial.begin(115200);
   Serial.setRxBufferSize(16 * 1024);
+  pinMode(KEY_PIN, INPUT_PULLUP);
 #if USE_WIFI
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -367,10 +558,6 @@ void setup() {
   memset(&data, 0, sizeof(data));
 }
 
-#if USE_WIFI
-String httpBody;
-#endif
-
 void loop() {
 #if USE_WIFI
   uint32_t now = millis();
@@ -386,6 +573,7 @@ void loop() {
       }
     }
   }
+  handleButton();
   delay(20);
 #else
   // ---- USB serial push: drain continuously, act on complete lines ----
@@ -395,7 +583,7 @@ void loop() {
     char c = (char)Serial.read();
     if (c == '\n') { gotLine = true; break; }
     line += c;
-    if (line.length() > 16384) line = "";   // corrupt / oversized: reset
+    if (line.length() > 16384) line = "";
   }
   if (gotLine) {
     bool ok = extractData(line);
@@ -406,11 +594,11 @@ void loop() {
       renderIfChanged(hash);
     }
   }
-  // repaint occasionally so relative ages stay honest even if data is stable
+  handleButton();
   static uint32_t lastTick = 0;
   if (lastDataMs && millis() - lastTick > 60000) {
     lastTick = millis();
-    render();
+    render();     // keep relative ages honest
   }
   delay(Serial.available() ? 0 : 5);
 #endif
