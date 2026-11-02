@@ -718,10 +718,13 @@ def build_snapshot(col: Collector):
         "today_tokens": int(pi_tok), "sessions_today": pi_today,
     }
 
+    now = datetime.now()
+    weekday = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][now.weekday()]
     return {
         "generated_at": int(time.time()),
-        "clock": datetime.now().strftime("%H:%M"),
-        "date": datetime.now().strftime("%m-%d"),
+        "clock": now.strftime("%H:%M"),
+        "date": now.strftime("%m-%d"),
+        "date_cn": f"{now.month}月{now.day}日 {weekday}",
         "host": socket.gethostname(),
         "shown": shown,
         "agents": {k: v for k, v in sorted(per_agent.items())},
@@ -757,7 +760,7 @@ SERIAL_GLOBS = ["/dev/cu.usbmodem*"]
 
 def wire_payload(snap):
     """Trimmed snapshot for the display (it only uses these keys)."""
-    w = {k: snap[k] for k in ("generated_at", "clock", "date", "host",
+    w = {k: snap[k] for k in ("generated_at", "clock", "date", "date_cn", "host",
                               "shown", "quota", "procs", "models", "notifs") if k in snap}
     return json.dumps(w, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
 
