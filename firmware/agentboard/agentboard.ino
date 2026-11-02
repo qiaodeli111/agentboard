@@ -31,6 +31,7 @@ U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(U8G2_R1, /*cs=*/40, /*dc=*/5, /*reset=*/41)
 #define W 400
 #define H 300
 #define KEY_PIN 18                  // board KEY button (pullup, pressed = LOW)
+#define BOOT_PIN 0                  // BOOT button works too (pullup, pressed = LOW)
 
 #define F_HEAD  u8g2_font_9x15B_tr
 #define F_ASCII u8g2_font_6x10_tr
@@ -492,7 +493,8 @@ void buildHash(char* out, size_t n) {
 void handleButton() {
   static uint32_t pressStart = 0;
   static bool longFired = false;
-  bool pressed = digitalRead(KEY_PIN) == LOW;
+  // either KEY (GPIO18) or BOOT (GPIO0), pressed = LOW
+  bool pressed = digitalRead(KEY_PIN) == LOW || digitalRead(BOOT_PIN) == LOW;
   uint32_t now = millis();
 
   if (pressed && pressStart == 0) {
@@ -501,7 +503,16 @@ void handleButton() {
   } else if (pressed && pressStart && !longFired && now - pressStart > 800) {
     longFired = true;
     Serial.print("ACK\n");          // tell the Mac to clear notifications
-    if (lastDataMs) render();       // repaint immediately (notifs may clear next push)
+    // immediate visual confirmation the press registered
+    if (lastDataMs) {
+      u8g2.clearBuffer();
+      u8g2.drawBox(0, 0, W, H);
+      u8g2.setDrawColor(0);
+      u8g2.setFont(F_CJK);
+      u8g2.drawUTF8(60, H / 2 + 6, "已发送清除，通知将消失…");
+      u8g2.setDrawColor(1);
+      u8g2.sendBuffer();
+    }
   } else if (!pressed && pressStart) {
     if (!longFired && now - pressStart > 30 && now - pressStart < 800) {
       if (page == 0) {
@@ -537,6 +548,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setRxBufferSize(16 * 1024);
   pinMode(KEY_PIN, INPUT_PULLUP);
+  pinMode(BOOT_PIN, INPUT_PULLUP);
 #if USE_WIFI
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
