@@ -11,6 +11,7 @@
 #define USE_WIFI 0   // 0 = USB serial push (default), 1 = ESP polls over WiFi
 
 #include <ArduinoJson.h>
+#include <SPI.h>
 #include <U8g2lib.h>
 #include "secrets.h"
 
@@ -21,10 +22,11 @@
 
 // ---------------- display ----------------
 // Pin remap per Waveshare wiki: SCK=11, MOSI=12, CS=40, DC=5, RST=41
-U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(U8G2_R0, /*cs=*/40, /*dc=*/5, /*reset=*/41);
+// U8G2_R1 = landscape (400x300). If it ends up upside-down, use U8G2_R3.
+U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(U8G2_R1, /*cs=*/40, /*dc=*/5, /*reset=*/41);
 
-#define W 300
-#define H 400
+#define W 400
+#define H 300
 
 #define F_HEAD  u8g2_font_9x15B_tr
 #define F_ASCII u8g2_font_6x10_tr
@@ -47,6 +49,7 @@ struct BoardData {
   Session s[MAX_SESSIONS];
   bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; char gptPlan[8];
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
+  bool hasPi; float piTok; int piSessions;
   int procClaude, procCodex, procPi; bool chatgptApp;
 };
 BoardData data;
@@ -140,6 +143,12 @@ bool extractData(const String& payload) {
     nd.claudeCost = (float)((double)(cl["today_cost"] | 0));
     nd.claudeSessions = cl["sessions_today"] | 0;
   }
+  JsonObject pi = doc["quota"]["pi"];
+  nd.hasPi = !pi.isNull();
+  if (nd.hasPi) {
+    nd.piTok = (float)((double)(pi["today_tokens"] | 0));
+    nd.piSessions = pi["sessions_today"] | 0;
+  }
 
   int i = 0;
   for (JsonObject item : doc["shown"].as<JsonArray>()) {
@@ -163,9 +172,9 @@ bool extractData(const String& payload) {
 // ---------------- ui ----------------
 void render() {
   u8g2.clearBuffer();
-  char buf[64];
+  char buf[72];
 
-  // header
+  // ---- header ----
   u8g2.setFont(F_HEAD);
   u8g2.drawUTF8(4, 15, "AgentBoard");
   u8g2.setFont(F_ASCII);
@@ -175,79 +184,94 @@ void render() {
   }
   u8g2.drawHLine(0, 20, W);
 
+  // ---- quota row 1: ChatGPT 5h + weekly, side by side ----
   int y = 38;
-  u8g2.setFont(F_ASCII);
-
-  // quota: ChatGPT (codex account windows)
   if (data.hasCodex) {
+    u8g2.setFont(F_ASCII);
     u8g2.drawStr(4, y, "ChatGPT");
     u8g2.setFont(F_CJK);
-    snprintf(buf, sizeof(buf), " (%s)", data.gptPlan);
-    u8g2.drawUTF8(52, y, buf);
+    snprintf(buf, sizeof(buf), "(%s)", data.gptPlan);
+    u8g2.drawUTF8(50, y, buf);
     u8g2.setFont(F_ASCII);
-    drawBar(104, y - 8, 84, 9, data.gpt5h);
+    drawBar(90, y - 8, 64, 9, data.gpt5h);
     snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
-    u8g2.drawStr(194, y, buf);
+    u8g2.drawStr(160, y, buf);
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(228, y, "5h重置");
+    u8g2.drawUTF8(192, y, "5h");
     u8g2.setFont(F_ASCII);
     snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
-    u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, y, buf);
-
-    y += 15;
+    u8g2.drawStr(210, y, buf);
+    // weekly on the right half
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(52, y, "每周");
+    u8g2.drawUTF8(270, y, "每周");
     u8g2.setFont(F_ASCII);
-    drawBar(104, y - 8, 84, 9, data.gptWeek);
+    drawBar(296, y - 8, 64, 9, data.gptWeek);
     snprintf(buf, sizeof(buf), "%.0f%%", data.gptWeek);
-    u8g2.drawStr(194, y, buf);
-    y += 12;
+    u8g2.drawStr(366, y, buf);
+    y += 16;
   }
 
-  // quota: Claude local stats
-  if (data.hasClaude) {
-    u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y, "CLAUDE");
-    u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(52, y, "今日");
-    u8g2.setFont(F_ASCII);
+  // ---- quota row 2: Claude today + pi today on one line ----
+  if (data.hasClaude || data.hasPi) {
     char tok[16];
-    fmtTokens(data.claudeTok, tok, sizeof(tok));
-    snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(88, y, buf);
-    snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
-    u8g2.drawStr(160, y, buf);
-    snprintf(buf, sizeof(buf), "%d sess", data.claudeSessions);
-    u8g2.drawStr(220, y, buf);
+    int x = 4;
+    if (data.hasClaude) {
+      u8g2.setFont(F_ASCII);
+      u8g2.drawStr(x, y, "CLAUDE");  x += 42;
+      u8g2.setFont(F_CJK);
+      u8g2.drawUTF8(x, y, "今日");   x += 28;
+      u8g2.setFont(F_ASCII);
+      fmtTokens(data.claudeTok, tok, sizeof(tok));
+      snprintf(buf, sizeof(buf), "%s tok", tok);
+      u8g2.drawStr(x, y, buf);       x += 62;
+      snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
+      u8g2.drawStr(x, y, buf);       x += 44;
+      snprintf(buf, sizeof(buf), "%ds", data.claudeSessions);
+      u8g2.drawStr(x, y, buf);       x += 30;
+    }
+    if (data.hasPi) {
+      u8g2.setFont(F_ASCII);
+      u8g2.drawStr(x + 8, y, "PI");  x += 28;
+      u8g2.setFont(F_CJK);
+      u8g2.drawUTF8(x, y, "今日");   x += 28;
+      u8g2.setFont(F_ASCII);
+      fmtTokens(data.piTok, tok, sizeof(tok));
+      snprintf(buf, sizeof(buf), "%s tok", tok);
+      u8g2.drawStr(x, y, buf);       x += 62;
+      snprintf(buf, sizeof(buf), "%ds", data.piSessions);
+      u8g2.drawStr(x, y, buf);
+    }
     y += 12;
   }
 
-  u8g2.drawHLine(0, y - 4, W);
+  u8g2.drawHLine(0, y - 3, W);
   y += 8;
 
-  // sessions
-  int rowsLeft = (H - 30 - y) / 34;   // 16px head + 15px title + 3 gap
+  // ---- sessions: one line each ----
+  int rowsLeft = (H - 26 - y) / 19;
   for (int i = 0; i < data.n && rowsLeft > 0; i++, rowsLeft--) {
     Session& s = data.s[i];
     drawStateGlyph(4, y, s.state);
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(16, y, agentShort(s.agent));
-    int x = 16 + u8g2.getStrWidth(agentShort(s.agent)) + 6;
+    u8g2.drawStr(14, y, agentShort(s.agent));
+    int x = 14 + u8g2.getStrWidth(agentShort(s.agent)) + 5;
     u8g2.setFont(F_CJK);
-    drawClipped(x, y, s.project, 150);
+    drawClipped(x, y, s.project, 96);
+    x += 100;
+    // age right-aligned
     u8g2.setFont(F_ASCII);
     fmtAge(s.age, buf, sizeof(buf));
-    u8g2.drawStr(W - u8g2.getStrWidth(buf) - 8, y, buf);
-
-    y += 15;
+    int ageW = u8g2.getStrWidth(buf);
+    u8g2.drawStr(W - ageW - 6, y, buf);
+    // title fills the middle
     u8g2.setFont(F_CJK);
-    drawClipped(16, y, s.title, W - 24);
+    drawClipped(x, y, s.title, W - 6 - ageW - 6 - x);
     y += 19;
   }
 
-  // footer
+  // ---- footer ----
   u8g2.setFont(F_ASCII);
-  u8g2.drawHLine(0, H - 22, W);
+  u8g2.drawHLine(0, H - 20, W);
   int nRun = 0, nIdle = 0;
   for (int i = 0; i < data.n; i++) {
     if (!strcmp(data.s[i].state, "running")) nRun++;
@@ -256,22 +280,22 @@ void render() {
   if (!lastDataMs) {
     u8g2.setFont(F_CJK);
 #if USE_WIFI
-    u8g2.drawUTF8(4, H - 8, "等待网络数据...");
+    u8g2.drawUTF8(4, H - 6, "等待网络数据...");
 #else
-    u8g2.drawUTF8(4, H - 8, "USB 等待数据...");
+    u8g2.drawUTF8(4, H - 6, "USB 等待数据...");
 #endif
   } else {
     u8g2.setFont(F_CJK);
     snprintf(buf, sizeof(buf), "跑%d 闲%d", nRun, nIdle);
-    u8g2.drawUTF8(4, H - 8, buf);
+    u8g2.drawUTF8(4, H - 6, buf);
     int w = u8g2.getUTF8Width(buf);
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4 + w + 8, H - 8, data.clock);
+    u8g2.drawStr(4 + w + 8, H - 6, data.clock);
   }
   u8g2.setFont(F_ASCII);
   snprintf(buf, sizeof(buf), "c%d x%d p%d %s", data.procClaude, data.procCodex,
            data.procPi, data.chatgptApp ? "GPT.app" : "");
-  u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 8, buf);
+  u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 6, buf);
 
   u8g2.sendBuffer();
 }

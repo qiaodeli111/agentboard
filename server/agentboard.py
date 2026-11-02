@@ -365,6 +365,9 @@ class Collector:
                 tout = u.get("output", 0)
                 if tin or tout:
                     m["tokens"] = m.get("tokens", 0) + tin + tout
+                    mts = ts or iso_ts(str(msg.get("timestamp") or ""))
+                    if mts and mts >= self.today:
+                        m["tok_today"] = m.get("tok_today", 0) + tin + tout
         m.setdefault("agent", "pi")
         m.setdefault("project", slug_to_project(slug))
         m.setdefault("id", path.stem)
@@ -557,6 +560,22 @@ def build_snapshot(col: Collector):
         "by_model": sorted(models.items(), key=lambda kv: -kv[1])[:3],
         "note": "estimate",
     }
+    pi_tok = 0
+    pi_today = 0
+    for st in col.files.values():
+        m = st.meta
+        if m.get("agent") != "pi":
+            continue
+        active_today = (m.get("last") or m.get("started") or 0) >= col.today
+        if active_today:
+            pi_today += 1
+        t = m.get("tok_today", 0)
+        if not t and active_today:
+            t = m.get("tokens", 0)   # no per-message timestamps: fall back to totals
+        pi_tok += t
+    quota["pi"] = {
+        "today_tokens": int(pi_tok), "sessions_today": pi_today,
+    }
 
     return {
         "generated_at": int(time.time()),
@@ -690,6 +709,7 @@ async function tick(){
   if(c.secondary)h+=`<div>每周 ${bar(c.secondary.used_percent)}</div>`;}
  if(q.claude){const c=q.claude;h+=`<h2>Claude 今日 (≈)</h2><div>${fmtT(c.today_tokens)} tokens · $${c.today_cost} · ${c.sessions_today} 会话</div>`;
   if(c.by_model&&c.by_model.length)h+=`<div class=mut>${c.by_model.map(([m,t])=>m+': '+fmtT(t)).join(' · ')}</div>`;}
+ if(q.pi){const p=q.pi;h+=`<h2>pi 今日</h2><div>${fmtT(p.today_tokens)} tokens · ${p.sessions_today} 会话</div>`;}
  document.getElementById('quota').innerHTML=h;
  const rows=(d.shown||[]).map(s=>`<tr><td>${AG[s.agent]||s.agent}</td><td class=${s.state}>${ST[s.state]}</td><td>${s.project}</td><td>${s.title}</td><td class=mut>${s.model||''}${s.originator?'<br>'+s.originator:''}</td><td class=mut>${fmtAge(s.age)}前</td></tr>`).join('');
  document.getElementById('t').innerHTML='<tr><th>Agent</th><th>状态</th><th>项目</th><th>标题</th><th>模型</th><th>最近活动</th></tr>'+rows;
