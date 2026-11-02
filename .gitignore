@@ -3,3 +3,4 @@ config.json
 __pycache__/
 *.log
 .DS_Store
+notifs.json
