@@ -109,6 +109,10 @@ def clean_title(text, limit=80):
     if not text:
         return None
     text = text.strip()
+    if text.startswith("# Files mentioned"):
+        # codex prepends a file-mention block to the real prompt; strip it
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        text = next((l for l in lines if not l.startswith("#")), "")
     if text.startswith(("<", "Caveat:", "[Request interrupted", "local-command", "[Context]")):
         return None
     text = re.sub(r"\[[^\]]*\]\([^)]*\)", " ", text)   # strip [@x](file://...) mentions
@@ -450,7 +454,7 @@ class Collector:
         keep = []
         for st in self.files.values():
             m = st.meta
-            if not m.get("agent") or m.get("agent") == "chatgpt":
+            if not m.get("agent"):
                 continue
             last = m.get("last") or m.get("started") or 0
             if last < cutoff:
@@ -631,10 +635,16 @@ def build_snapshot(col: Collector):
     col.scan_claude()
     col.scan_codex()
     col.scan_pi()
-    listed = col.tag_states() + col.scan_chatgpt_index()
+    listed = col.tag_states()
+
+    # stale index entries only for threads we don't already have from rollouts
+    known_ids = {s["id"] for s in listed}
+    listed += [n for n in col.scan_chatgpt_index() if n["id"] not in known_ids]
 
     # turn-complete notifications: transition running -> idle.
     # idle -> running means the user went back to that agent: drop its notif.
+    # first sight of an already-idle session finished <10min ago: seed a
+    # notification so a daemon restart right after a finish isn't missed.
     for st in col.files.values():
         m = st.meta
         if not m.get("agent"):
@@ -645,14 +655,19 @@ def build_snapshot(col: Collector):
             if s["id"] == m.get("id"):
                 cur = s["state"]
                 break
+        if cur is None:
+            continue
         if prev == "running" and cur == "idle":
             NOTIFS.add(m["agent"], m.get("project") or "?",
                        m.get("summary") or m.get("title") or "(no title)",
                        m.get("last") or time.time())
         if prev == "idle" and cur == "running":
             NOTIFS.drop_for(m["agent"], m.get("project") or "?")
-        if cur:
-            m["prev_state"] = cur
+        if "prev_state" not in m and cur == "idle" and time.time() - (m.get("last") or 0) <= 600:
+            NOTIFS.add(m["agent"], m.get("project") or "?",
+                       m.get("summary") or m.get("title") or "(no title)",
+                       m.get("last") or time.time())
+        m["prev_state"] = cur
     NOTIFS.reap()
 
     order = {"running": 0, "idle": 1, "done": 2}
