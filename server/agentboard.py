@@ -41,6 +41,7 @@ DEFAULTS = {
     "scan_interval_sec": 5,
     "notif_file": str(HOME / "agentboard" / "server" / "notifs.json"),
     "notif_max": 20,
+    "codex_imports_file": str(HOME / ".codex" / "external_agent_session_imports.json"),
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -186,7 +187,28 @@ class Collector:
     def __init__(self):
         self.files = {}            # path -> FileState
         self.today = None          # local midnight, for daily stats
+        self._imported = set()     # codex thread ids that mirror external sessions
+        self._imported_mtime = None
         self._roll_day()
+
+    def _imported_thread_ids(self):
+        """Thread ids the ChatGPT desktop app imported from external agents
+        (Claude Code etc). Those rollouts are copies — skip them so one
+        working session doesn't produce duplicate notifications."""
+        path = CFG["codex_imports_file"]
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            return self._imported
+        if mt != self._imported_mtime:
+            try:
+                d = json.load(open(path))
+                self._imported = {r.get("imported_thread_id")
+                                  for r in d.get("records", []) if isinstance(r, dict)}
+            except Exception:
+                self._imported = set()
+            self._imported_mtime = mt
+        return self._imported
 
     def _roll_day(self):
         now = datetime.now()
@@ -322,6 +344,10 @@ class Collector:
             pt = p.get("type", "")
             if t == "session_meta":
                 m["id"] = p.get("id") or m.get("id")
+                if m["id"] in self._imported_thread_ids():
+                    m.clear()
+                    m["_skip"] = True
+                    return
                 if p.get("cwd"):
                     m["project"] = project_from_cwd(p["cwd"])
                 origin = p.get("originator") or ""
@@ -342,6 +368,8 @@ class Collector:
 
     def _codex_file(self, path, st):
         m = st.meta
+        if m.get("_skip"):
+            return
         try:
             size = os.path.getsize(path)
         except OSError:
@@ -360,6 +388,10 @@ class Collector:
             pt = p.get("type", "")
             if t == "session_meta":
                 m["id"] = p.get("id") or path.stem
+                if m["id"] in self._imported_thread_ids():
+                    m.clear()
+                    m["_skip"] = True          # mirror of an external session
+                    return
                 if p.get("cwd"):
                     m["project"] = project_from_cwd(p["cwd"])
                 origin = p.get("originator") or ""
