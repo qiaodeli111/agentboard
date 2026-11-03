@@ -74,7 +74,7 @@ struct BoardData {
   Notif notif[MAX_NOTIFS];
   int  nm;
   ModelRow model[MAX_MODELS];
-  bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; char gptPlan[8];
+  bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; int32_t gptSnapAge; char gptPlan[8];
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
   bool hasPi; float piTok; int piSessions;
   int procClaude, procCodex, procPi; bool chatgptApp;
@@ -199,7 +199,9 @@ bool extractData(const String& payload) {
     nd.gptWeek = gpt["secondary"]["used_percent"] | 0.0;
     int32_t resets = gpt["primary"]["resets_at"] | 0;
     int32_t gen = doc["generated_at"] | 0;
+    int32_t ts = gpt["ts"] | 0;
     nd.gptResetIn = resets > gen ? resets - gen : 0;
+    nd.gptSnapAge = ts ? (gen > ts ? gen - ts : 0) : 0;
     strlcpy(nd.gptPlan, gpt["plan"] | "?", sizeof(nd.gptPlan));
   }
   JsonObject cl = doc["quota"]["claude"];
@@ -317,20 +319,34 @@ void drawQuota(int yTop) {
     snprintf(buf, sizeof(buf), "(%s)", data.gptPlan);
     u8g2.drawUTF8(50, y + 10, buf);
     u8g2.setFont(F_ASCII);
-    drawBar(90, y + 2, 64, 9, data.gpt5h);
-    snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
-    u8g2.drawStr(160, y + 10, buf);
-    u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(192, y + 10, "5h");
+    drawBar(90, y + 2, 56, 9, data.gptResetIn > 0 ? data.gpt5h : 0);
+    if (data.gptResetIn > 0) {
+      snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
+      u8g2.drawStr(152, y + 10, buf);
+      u8g2.setFont(F_CJK);
+      u8g2.drawUTF8(178, y + 10, "重置");
+      u8g2.setFont(F_ASCII);
+      snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
+      u8g2.drawStr(202, y + 10, buf);
+    } else {
+      // window already reset: the percent above is from the old window
+      u8g2.setFont(F_CJK);
+      u8g2.drawUTF8(152, y + 10, "已重置·待刷新");
+    }
+    // snapshot age so stale numbers are obvious
     u8g2.setFont(F_ASCII);
-    snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
-    u8g2.drawStr(210, y + 10, buf);
+    char age[12];
+    if (data.gptSnapAge < 120)       snprintf(age, sizeof(age), "now");
+    else if (data.gptSnapAge < 3600) snprintf(age, sizeof(age), "%ldm", (long)(data.gptSnapAge / 60));
+    else                             snprintf(age, sizeof(age), "%ldh", (long)(data.gptSnapAge / 3600));
+    snprintf(buf, sizeof(buf), "%s", age);
+    u8g2.drawStr(262, y + 10, buf);
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(270, y + 10, "每周");
+    u8g2.drawUTF8(288, y + 10, "每周");
     u8g2.setFont(F_ASCII);
-    drawBar(296, y + 2, 64, 9, data.gptWeek);
+    drawBar(314, y + 2, 56, 9, data.gptWeek);
     snprintf(buf, sizeof(buf), "%.0f%%", data.gptWeek);
-    u8g2.drawStr(366, y + 10, buf);
+    u8g2.drawStr(376, y + 10, buf);
     y += 18;
   }
   if (data.hasClaude) {
