@@ -326,7 +326,12 @@ void drawQuota(int yTop) {
       u8g2.setFont(F_CJK);
       u8g2.drawUTF8(178, y + 10, "重置");
       u8g2.setFont(F_ASCII);
-      snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
+      if (data.gptResetIn >= 3600) {
+        snprintf(buf, sizeof(buf), "%ldh%02dm",
+                 (long)(data.gptResetIn / 3600), (long)((data.gptResetIn % 3600) / 60));
+      } else {
+        snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
+      }
       u8g2.drawStr(202, y + 10, buf);
     } else {
       // window already reset: the percent above is from the old window
