@@ -109,10 +109,15 @@ def clean_title(text, limit=80):
     if not text:
         return None
     text = text.strip()
-    if text.startswith("# Files mentioned"):
-        # codex prepends a file-mention block to the real prompt; strip it
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        text = next((l for l in lines if not l.startswith("#")), "")
+    if "# Files mentioned" in text:
+        # codex prepends a file-mention block; the real prompt follows "## My request:"
+        parts = re.split(r"#+\s*My request:?\s*", text, maxsplit=1)
+        if len(parts) == 2:
+            text = parts[1]
+        else:
+            lines = [l.strip() for l in text.splitlines()
+                     if l.strip() and not l.strip().startswith("#")]
+            text = lines[0] if lines else ""
     if text.startswith(("<", "Caveat:", "[Request interrupted", "local-command", "[Context]")):
         return None
     text = re.sub(r"\[[^\]]*\]\([^)]*\)", " ", text)   # strip [@x](file://...) mentions
