@@ -182,6 +182,15 @@ class Collector:
     def _roll_day(self):
         now = datetime.now()
         self.today = datetime(now.year, now.month, now.day).timestamp()
+        # the daemon is long-lived: clear per-day accumulators so "today"
+        # doesn't carry yesterday's tokens across midnight
+        for st in self.files.values():
+            m = st.meta
+            if not m:
+                continue
+            m.pop("tok_today", None)
+            m.pop("cost_today", None)
+            m.pop("models", None)
 
     def rollover_check(self):
         if datetime.now().timestamp() - self.today > 86400:
@@ -687,8 +696,8 @@ def build_snapshot(col: Collector):
         m = st.meta
         if m.get("agent") != "claude":
             continue
-        if (m.get("started") or 0) >= col.today:
-            n_today += 1
+        if (m.get("last") or m.get("started") or 0) >= col.today:
+            n_today += 1          # sessions active today (incl. started yesterday)
         t = m.get("tok_today", 0)
         if t:
             tok += t
@@ -711,8 +720,8 @@ def build_snapshot(col: Collector):
         if active_today:
             pi_today += 1
         t = m.get("tok_today", 0)
-        if not t and active_today:
-            t = m.get("tokens", 0)   # no per-message timestamps: fall back to totals
+        if not t and (m.get("started") or 0) >= col.today:
+            t = m.get("tokens", 0)   # started today, no per-message timestamps
         pi_tok += t
     quota["pi"] = {
         "today_tokens": int(pi_tok), "sessions_today": pi_today,
