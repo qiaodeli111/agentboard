@@ -158,7 +158,7 @@ def iter_new_lines(path, st, max_first_read=32 * 1024 * 1024):
         st.offset = 0
         st.meta = {}
     if st.offset == 0 and size > max_first_read:
-        st.offset = size - 8 * 1024 * 1024    # huge file: only tail
+        st.offset = size - 8 * 1024 * 1024    # huge file: only tail (seeded by caller)
     try:
         with open(path, "rb") as f:
             f.seek(st.offset)
@@ -293,8 +293,62 @@ class Collector:
             self._codex_file(p, st)
         return []
 
+    def _seed_codex_head(self, path, m):
+        """Huge-rollout identity seed: parse only the file head for
+        session_meta (true start / project / originator) and the first
+        turn_context (model). Token accounting is deliberately skipped so
+        the tail's first token_count becomes the baseline — otherwise a
+        head→tail gap of weeks gets counted as today's usage."""
+        try:
+            with open(path, "rb") as f:
+                head = f.read(2 * 1024 * 1024)   # early lines can be huge
+        except OSError:
+            return
+        hcut = head.rfind(b"\n")
+        if hcut <= 0:
+            return
+        for raw in head[:hcut].split(b"\n"):
+            if not raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            ts = iso_ts(d.get("timestamp", ""))
+            if ts and (not m.get("started") or ts < m["started"]):
+                m["started"] = ts
+            t = d.get("type")
+            p = d.get("payload") or {}
+            pt = p.get("type", "")
+            if t == "session_meta":
+                m["id"] = p.get("id") or m.get("id")
+                if p.get("cwd"):
+                    m["project"] = project_from_cwd(p["cwd"])
+                origin = p.get("originator") or ""
+                m["originator"] = origin or None
+                m["agent"] = "chatgpt" if any(
+                    k in origin.lower() for k in ("desktop", "chatgpt")) else "codex"
+            elif t == "turn_context" and p.get("model") and not m.get("model"):
+                m["model"] = p["model"]
+            elif pt == "user_message" and not m.get("title"):
+                s = clean_title(p.get("message"))
+                if s:
+                    m["title"] = s
+            elif (t == "response_item" and p.get("type") == "message"
+                  and p.get("role") == "user" and not m.get("title")):
+                s = clean_title(text_from_content(p.get("content")))
+                if s:
+                    m["title"] = s
+
     def _codex_file(self, path, st):
         m = st.meta
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return
+        if st.offset == 0 and size > 32 * 1024 * 1024:
+            self._seed_codex_head(path, m)
+            st.offset = size - 8 * 1024 * 1024
         for d in iter_new_lines(path, st):
             t = d.get("type")
             ts = iso_ts(d.get("timestamp", ""))
