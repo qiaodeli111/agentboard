@@ -435,7 +435,10 @@ class Collector:
                             md = m.setdefault("models", {})
                             md[mdl] = md.get(mdl, 0) + delta
                 rl = p.get("rate_limits")
-                if rl and ts:
+                # when the 5h window is exhausted codex also emits token_count
+                # events with empty rate_limits — don't let those blank out
+                # the last real snapshot
+                if rl and ts and (rl.get("primary") or {}).get("used_percent") is not None:
                     prev = Collector.quota_codex
                     if not prev or ts >= prev.get("ts", 0):
                         Collector.quota_codex = {"ts": ts, "data": rl}
