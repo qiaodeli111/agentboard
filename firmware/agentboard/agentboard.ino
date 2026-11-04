@@ -74,7 +74,7 @@ struct BoardData {
   Notif notif[MAX_NOTIFS];
   int  nm;
   ModelRow model[MAX_MODELS];
-  bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; int32_t gptSnapAge; char gptPlan[8];
+  bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; int32_t gptSnapAge; bool gptLimited; char gptPlan[8];
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
   bool hasPi; float piTok; int piSessions;
   int procClaude, procCodex, procPi; bool chatgptApp;
@@ -202,6 +202,7 @@ bool extractData(const String& payload) {
     int32_t ts = gpt["ts"] | 0;
     nd.gptResetIn = resets > gen ? resets - gen : 0;
     nd.gptSnapAge = ts ? (gen > ts ? gen - ts : 0) : 0;
+    nd.gptLimited = gpt["limited"] | false;
     strlcpy(nd.gptPlan, gpt["plan"] | "?", sizeof(nd.gptPlan));
   }
   JsonObject cl = doc["quota"]["claude"];
@@ -321,8 +322,16 @@ void drawQuota(int yTop) {
     u8g2.setFont(F_ASCII);
     drawBar(90, y + 2, 56, 9, data.gptResetIn > 0 ? data.gpt5h : 0);
     if (data.gptResetIn > 0) {
-      snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
-      u8g2.drawStr(152, y + 10, buf);
+      if (data.gptLimited) {
+        // empty-limits events: the window hit its cap
+        drawBar(90, y + 2, 56, 9, 100.0f);
+        snprintf(buf, sizeof(buf), "100%%");
+        u8g2.drawStr(152, y + 10, buf);
+      } else {
+        drawBar(90, y + 2, 56, 9, data.gpt5h);
+        snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
+        u8g2.drawStr(152, y + 10, buf);
+      }
       u8g2.setFont(F_CJK);
       u8g2.drawUTF8(178, y + 10, "重置");
       u8g2.setFont(F_ASCII);

@@ -183,6 +183,7 @@ def iter_new_lines(path, st, max_first_read=32 * 1024 * 1024):
 
 class Collector:
     quota_codex = {}   # latest ChatGPT rate_limits snapshot across codex files
+    quota_limited = False   # empty-limits events seen => 5h window capped
 
     def __init__(self):
         self.files = {}            # path -> FileState
@@ -435,13 +436,17 @@ class Collector:
                             md = m.setdefault("models", {})
                             md[mdl] = md.get(mdl, 0) + delta
                 rl = p.get("rate_limits")
-                # when the 5h window is exhausted codex also emits token_count
-                # events with empty rate_limits — don't let those blank out
-                # the last real snapshot
-                if rl and ts and (rl.get("primary") or {}).get("used_percent") is not None:
-                    prev = Collector.quota_codex
-                    if not prev or ts >= prev.get("ts", 0):
-                        Collector.quota_codex = {"ts": ts, "data": rl}
+                if rl and ts:
+                    if (rl.get("primary") or {}).get("used_percent") is not None:
+                        prev = Collector.quota_codex
+                        if not prev or ts >= prev.get("ts", 0):
+                            Collector.quota_codex = {"ts": ts, "data": rl}
+                            Collector.quota_limited = False
+                    elif not Collector.quota_codex or ts >= Collector.quota_codex.get("ts", 0):
+                        # empty rate_limits right after a good snapshot: the
+                        # window hit its cap and codex stopped getting real
+                        # numbers — report it as exhausted
+                        Collector.quota_limited = True
         m.setdefault("agent", "codex")
         m.setdefault("project", m.get("project")
                      or ("ChatGPT" if m.get("agent") == "chatgpt" else "codex"))
@@ -797,6 +802,7 @@ def build_snapshot(col: Collector):
             "plan": d.get("plan_type"),
             "primary": d.get("primary"), "secondary": d.get("secondary"),
             "credits": d.get("credits"), "ts": q["ts"],
+            "limited": Collector.quota_limited,
         }
     tok = cost = 0.0
     n_today = 0
