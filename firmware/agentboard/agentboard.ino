@@ -455,7 +455,8 @@ void renderNotifs() {
     u8g2.setFont(F_ASCII);
     u8g2.drawStr(12, 190, "no pending alerts");
   } else {
-    // compact clock top-left, date + weather to its right, notifications below
+    // compact clock top-left, date beside it, notifications below;
+    // weather lives on the second row, right-aligned away from the date
     u8g2.setFont(F_BIG);
     u8g2.drawStr(8, 80, data.clock);
     int cw = u8g2.getStrWidth(data.clock);
@@ -463,7 +464,7 @@ void renderNotifs() {
     u8g2.drawUTF8(16 + cw, 52, data.datecn);
     if (data.wxText[0]) {
       int ww = u8g2.getUTF8Width(data.wxText);
-      u8g2.drawUTF8(W - ww - 8, 52, data.wxText);
+      u8g2.drawUTF8(W - ww - 8, 80, data.wxText);
     }
     u8g2.setFont(F_CJK);
     snprintf(buf, sizeof(buf), "通知 %d 条", data.nn);
