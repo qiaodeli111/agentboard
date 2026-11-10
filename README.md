@@ -29,6 +29,7 @@
 │  读 ~/.claude/projects (会话)    │  /dev/cu.usbmodem*│ U8g2 → ST7305 整屏刷新  │
 │  读 ~/.codex/sessions (会话+额度) │   每 10s 一行    │ 内容没变就不重绘         │
 │  读 ~/.pi/agent/sessions (会话)  │                  └────────────────────────┘
+│  读 ~/.dsh/sessions (会话+余额)  │  ← DeepSeek Harness，余额 5min 一查
 │  ps+lsof 识别活进程 → 项目映射    │
 │  GET /api/status  GET /(浏览器)  │   ← 同一份数据，浏览器预览用
 └──────────────────────────────────┘
@@ -37,6 +38,7 @@
 - **会话状态**：`running` = 会话文件 60 秒内有写入（agent 真在干活）；`idle` = 安静 1 小时内（等输入/闲）；`done` = 更久（24h 窗口内）。**通知** = 状态从 running 翻转为 idle（一轮干完，等你）
 - **通知确认**：屏上长按 KEY（发 `ACK` 回 Mac）或浏览器"全部清除"按钮（`POST /api/ack`）；通知持久化在 `server/notifs.json`，服务重启不丢
 - **ChatGPT 额度**：从 Codex 会话文件里解析的 ChatGPT 账号官方额度窗口（5 小时 + 每周，含重置时间）。ChatGPT 网页版普通聊天额度无官方 API，不覆盖
+- **DSH（DeepSeek Harness）**：会话（zstd jsonl）+ 账户余额（platform.deepseek.com 钱包接口，x-dsh-auth-token 认证，5 分钟刷新）+ 分模型今日用量
 - **Claude 统计**：本地解析 transcript 的今日 token / 费用估算（外部 API 模型如 GLM 没有价格表，费用为 0 只计数）
 - **ChatGPT 桌面版会话**：Codex Desktop originator 的线程，自动归类到 `chatgpt` 名下
 - **数据不出机器**：全部本地解析，串口直连，不经过任何网络
