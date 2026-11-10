@@ -589,7 +589,8 @@ class Collector:
                     m["provider"] = p["provider"]
             elif t == "assistant/message":
                 u = p.get("usage") or {}
-                tin = u.get("inputTokens", 0)
+                tin = u.get("inputTokens", 0) + u.get("cacheReadTokens", 0) \
+                    + u.get("cacheWriteTokens", 0)
                 tout = u.get("outputTokens", 0)
                 if tin or tout:
                     m["tokens"] = m.get("tokens", 0) + tin + tout
