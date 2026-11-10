@@ -766,8 +766,8 @@ def classify_procs():
                              timeout=10).stdout
     except Exception:
         return {}, {}, {}
-    pids = {"claude": [], "codex": [], "pi": []}
-    flags = {"chatgpt_app": False}
+    pids = {"claude": [], "codex": [], "pi": [], "dsh": []}
+    flags = {"chatgpt_app": False, "dsh_app": False}
     for line in out.splitlines():
         line = line.strip()
         if not line:
@@ -782,6 +782,9 @@ def classify_procs():
         names = {os.path.basename(comm).lower(), os.path.basename(arg0).lower()}
         if "ChatGPT.app/Contents/MacOS/ChatGPT" in args or "chatgpt" in names:
             flags["chatgpt_app"] = True
+        if ("DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness" in args
+                and "ptc-runtime" not in args):
+            flags["dsh_app"] = True   # the desktop host (helpers are filtered below)
         low_line = (comm + " " + args).lower()
         if any(x in low_line for x in ("crashpad", "helper", "(service)", "(renderer)")):
             continue
@@ -792,6 +795,8 @@ def classify_procs():
             agent = "codex"
         elif "pi" in names or ("pi-acp" in args and names & {"node", "python", "bun"}):
             agent = "pi"
+        elif "dsh" in names:
+            agent = "dsh"             # dsh CLI
         elif names & {"node", "bun"} and re.search(r"(^|[ /])claude([ /]|$)", args):
             agent = "claude"          # claude CLI running under a node launcher
         else:

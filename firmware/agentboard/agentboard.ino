@@ -79,7 +79,7 @@ struct BoardData {
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
   bool hasPi; float piTok; int piSessions;
   bool hasDsh; float dshBalance, dshBonus, dshTok; int dshSessions;
-  int procClaude, procCodex, procPi; bool chatgptApp;
+  int procClaude, procCodex, procPi, procDsh; bool chatgptApp, dshApp;
 };
 BoardData data;
 uint32_t lastDataMs = 0;
@@ -207,6 +207,8 @@ bool extractData(const String& payload) {
   nd.procClaude = doc["procs"]["claude"] | 0;
   nd.procCodex  = doc["procs"]["codex"] | 0;
   nd.procPi     = doc["procs"]["pi"] | 0;
+  nd.procDsh    = doc["procs"]["dsh"] | 0;
+  nd.dshApp     = doc["procs"]["dsh_app"] | false;
 
   JsonObject gpt = doc["quota"]["codex"];
   nd.hasCodex = !gpt.isNull();
@@ -325,11 +327,24 @@ void drawFooter(int activePage) {
       else if (!strcmp(data.s[i].state, "idle")) nIdle++;
     }
     snprintf(buf, sizeof(buf), "run %d idle %d", nRun, nIdle);
+    u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 6, buf);
   } else {
-    snprintf(buf, sizeof(buf), "c%d x%d p%d %s", data.procClaude, data.procCodex,
-             data.procPi, data.chatgptApp ? "GPT.app" : "");
+    // live process counts as agent icons; app presence as icons at far right
+    int x = W - 4;
+    if (data.dshApp) { drawAgentIcon(x - 14, H - 16, "dsh"); x -= 20; }
+    if (data.chatgptApp) { drawAgentIcon(x - 14, H - 16, "chatgpt"); x -= 20; }
+    const char* order[4] = {"claude", "codex", "pi", "dsh"};
+    int counts[4] = {data.procClaude, data.procCodex, data.procPi, data.procDsh};
+    for (int i = 3; i >= 0; i--) {
+      char cbuf[6];
+      snprintf(cbuf, sizeof(cbuf), "%d", counts[i]);
+      int seg = 14 + 3 + u8g2.getStrWidth(cbuf) + 7;
+      x -= seg;
+      drawAgentIcon(x, H - 16, order[i]);
+      u8g2.setFont(F_ASCII);
+      u8g2.drawStr(x + 17, H - 6, cbuf);
+    }
   }
-  u8g2.drawStr(W - u8g2.getStrWidth(buf) - 4, H - 6, buf);
 }
 
 // quota block shared by the home page (drawn at a fixed y at the bottom)
