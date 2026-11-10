@@ -145,6 +145,7 @@ void drawStateGlyph(int x, int y, const char* state) {
 // 14x11 agent icons at (x, yTop). claude = 8-ray starburst, codex = terminal
 // ">_ box", pi = Greek π, chatgpt = speech bubble. Honors current draw color.
 void drawAgentIcon(int x, int yTop, const char* a) {
+  int savedColor = u8g2.getDrawColor();   // icons must not leak draw color
   if (!strcmp(a, "claude")) {
     int cx = x + 6, cy = yTop + 5;
     u8g2.drawLine(cx - 5, cy, cx + 5, cy);
@@ -170,13 +171,15 @@ void drawAgentIcon(int x, int yTop, const char* a) {
     u8g2.drawLine(x + 9, yTop + 6, x + 12, yTop + 3);
     u8g2.drawLine(x + 9, yTop + 6, x + 12, yTop + 8);
     u8g2.drawLine(x + 12, yTop + 3, x + 12, yTop + 8);
-    u8g2.setDrawColor(0);
+    int c2 = u8g2.getDrawColor();
+    u8g2.setDrawColor(savedColor == 1 ? 0 : 1);   // eye contrasts with body
     u8g2.drawPixel(x + 3, yTop + 5);
-    u8g2.setDrawColor(1);
+    u8g2.setDrawColor(c2);
   } else {
     u8g2.drawFrame(x, yTop, 11, 11);
     u8g2.drawLine(x + 2, yTop + 5, x + 8, yTop + 5);
   }
+  u8g2.setDrawColor(savedColor);
 }
 
 // icon + short name; returns x after the tag
@@ -232,8 +235,8 @@ bool extractData(const String& payload) {
   JsonObject ds = doc["quota"]["dsh"];
   nd.hasDsh = !ds.isNull();
   if (nd.hasDsh) {
-    nd.dshBalance = (float)((double)(ds["balance"] | 0));
-    nd.dshBonus = (float)((double)(ds["bonus"] | 0));
+    nd.dshBalance = (float)(ds["balance"] | 0.0);   // double default: don't truncate
+    nd.dshBonus = (float)(ds["bonus"] | 0.0);
     nd.dshTok = (float)((double)(ds["today_tokens"] | 0));
     nd.dshSessions = ds["sessions_today"] | 0;
   }
