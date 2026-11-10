@@ -433,17 +433,18 @@ void drawQuota(int yTop) {
     drawAgentIcon(2, y, "dsh");
     u8g2.setFont(F_ASCII);
     u8g2.drawStr(18, y + 10, "DSH");
-    snprintf(buf, sizeof(buf), "¥%.2f", (double)data.dshBalance);
-    u8g2.drawStr(52, y + 10, buf);
+    snprintf(buf, sizeof(buf), "%.2f", (double)data.dshBalance);
+    u8g2.drawStr(44, y + 10, buf);
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(112, y + 10, "今日");
+    u8g2.drawUTF8(76, y + 10, "元");
+    u8g2.drawUTF8(96, y + 10, "今日");
     u8g2.setFont(F_ASCII);
     char tok[16];
     fmtTokens(data.dshTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(144, y + 10, buf);
+    u8g2.drawStr(130, y + 10, buf);
     snprintf(buf, sizeof(buf), "%d sess", data.dshSessions);
-    u8g2.drawStr(214, y + 10, buf);
+    u8g2.drawStr(200, y + 10, buf);
   }
 }
 
