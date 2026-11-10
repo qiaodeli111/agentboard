@@ -67,7 +67,8 @@ struct ModelRow {
 struct BoardData {
   char clock[8];
   char host[24];
-  char datecn[20];
+  char datecn[32];       // "11月10日 星期一" is 20 UTF-8 bytes — was truncated at 20
+  char wxText[24];       // "24℃ 多云"
   int  n;
   Session s[MAX_SESSIONS];
   int  nn;
@@ -201,6 +202,7 @@ bool extractData(const String& payload) {
   strlcpy(nd.clock, doc["clock"] | "?", sizeof(nd.clock));
   strlcpy(nd.host, doc["host"] | "?", sizeof(nd.host));
   strlcpy(nd.datecn, doc["date_cn"] | "", sizeof(nd.datecn));
+  strlcpy(nd.wxText, doc["weather"]["text"] | "", sizeof(nd.wxText));
   nd.chatgptApp = doc["procs"]["chatgpt_app"] | false;
   nd.procClaude = doc["procs"]["claude"] | 0;
   nd.procCodex  = doc["procs"]["codex"] | 0;
@@ -336,26 +338,23 @@ void drawQuota(int yTop) {
   int y = yTop;
   u8g2.drawHLine(0, y - 6, W);
   if (data.hasCodex) {
+    drawAgentIcon(2, y, "chatgpt");
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y + 10, "ChatGPT");
-    u8g2.setFont(F_CJK);
-    snprintf(buf, sizeof(buf), "(%s)", data.gptPlan);
-    u8g2.drawUTF8(50, y + 10, buf);
-    u8g2.setFont(F_ASCII);
-    drawBar(90, y + 2, 56, 9, data.gptResetIn > 0 ? data.gpt5h : 0);
+    u8g2.drawStr(18, y + 10, "ChatGPT");
+    drawBar(68, y + 2, 56, 9, data.gptResetIn > 0 ? data.gpt5h : 0);
     if (data.gptResetIn > 0) {
       if (data.gptLimited) {
         // empty-limits events: the window hit its cap
-        drawBar(90, y + 2, 56, 9, 100.0f);
+        drawBar(68, y + 2, 56, 9, 100.0f);
         snprintf(buf, sizeof(buf), "100%%");
-        u8g2.drawStr(152, y + 10, buf);
+        u8g2.drawStr(128, y + 10, buf);
       } else {
-        drawBar(90, y + 2, 56, 9, data.gpt5h);
+        drawBar(68, y + 2, 56, 9, data.gpt5h);
         snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
-        u8g2.drawStr(152, y + 10, buf);
+        u8g2.drawStr(128, y + 10, buf);
       }
       u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(178, y + 10, "重置");
+      u8g2.drawUTF8(156, y + 10, "重置");
       u8g2.setFont(F_ASCII);
       if (data.gptResetIn >= 3600) {
         snprintf(buf, sizeof(buf), "%ldh%02dm",
@@ -363,11 +362,11 @@ void drawQuota(int yTop) {
       } else {
         snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
       }
-      u8g2.drawStr(202, y + 10, buf);
+      u8g2.drawStr(180, y + 10, buf);
     } else {
       // window already reset: the percent above is from the old window
       u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(152, y + 10, "已重置·待刷新");
+      u8g2.drawUTF8(128, y + 10, "已重置·待刷新");
     }
     // snapshot age so stale numbers are obvious
     u8g2.setFont(F_ASCII);
@@ -376,59 +375,60 @@ void drawQuota(int yTop) {
     else if (data.gptSnapAge < 3600) snprintf(age, sizeof(age), "%ldm", (long)(data.gptSnapAge / 60));
     else                             snprintf(age, sizeof(age), "%ldh", (long)(data.gptSnapAge / 3600));
     snprintf(buf, sizeof(buf), "%s", age);
-    u8g2.drawStr(262, y + 10, buf);
+    u8g2.drawStr(232, y + 10, buf);
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(288, y + 10, "每周");
+    u8g2.drawUTF8(262, y + 10, "每周");
     u8g2.setFont(F_ASCII);
-    drawBar(314, y + 2, 56, 9, data.gptWeek);
+    drawBar(288, y + 2, 56, 9, data.gptWeek);
     snprintf(buf, sizeof(buf), "%.0f%%", data.gptWeek);
-    u8g2.drawStr(376, y + 10, buf);
+    u8g2.drawStr(350, y + 10, buf);
     y += 18;
   }
   if (data.hasClaude) {
+    drawAgentIcon(2, y, "claude");
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y + 10, "CLAUDE");
+    u8g2.drawStr(18, y + 10, "CLAUDE");
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(46, y + 10, "今日");
+    u8g2.drawUTF8(58, y + 10, "今日");
     u8g2.setFont(F_ASCII);
     char tok[16];
     fmtTokens(data.claudeTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(76, y + 10, buf);
-    snprintf(buf, sizeof(buf), "$%.2f", data.claudeCost);
-    u8g2.drawStr(146, y + 10, buf);
+    u8g2.drawStr(90, y + 10, buf);
     snprintf(buf, sizeof(buf), "%d sess", data.claudeSessions);
-    u8g2.drawStr(200, y + 10, buf);
+    u8g2.drawStr(152, y + 10, buf);
     y += 16;
   }
   if (data.hasPi) {
+    drawAgentIcon(2, y, "pi");
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y + 10, "PI");
+    u8g2.drawStr(18, y + 10, "PI");
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(24, y + 10, "今日");
+    u8g2.drawUTF8(40, y + 10, "今日");
     u8g2.setFont(F_ASCII);
     char tok[16];
     fmtTokens(data.piTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(56, y + 10, buf);
+    u8g2.drawStr(72, y + 10, buf);
     snprintf(buf, sizeof(buf), "%d sess", data.piSessions);
-    u8g2.drawStr(126, y + 10, buf);
+    u8g2.drawStr(142, y + 10, buf);
     y += 16;
   }
   if (data.hasDsh) {
+    drawAgentIcon(2, y, "dsh");
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(4, y + 10, "DSH");
+    u8g2.drawStr(18, y + 10, "DSH");
     snprintf(buf, sizeof(buf), "¥%.2f", (double)data.dshBalance);
-    u8g2.drawStr(34, y + 10, buf);
+    u8g2.drawStr(52, y + 10, buf);
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(96, y + 10, "今日");
+    u8g2.drawUTF8(112, y + 10, "今日");
     u8g2.setFont(F_ASCII);
     char tok[16];
     fmtTokens(data.dshTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(128, y + 10, buf);
+    u8g2.drawStr(144, y + 10, buf);
     snprintf(buf, sizeof(buf), "%d sess", data.dshSessions);
-    u8g2.drawStr(198, y + 10, buf);
+    u8g2.drawStr(214, y + 10, buf);
   }
 }
 
@@ -443,20 +443,28 @@ void renderNotifs() {
   int notifBottom = quotaTop - 8;
 
   if (data.nn == 0) {
-    // clock-first: big time centered in the free area
+    // clock-first: big time centered in the free area, weather beside it
     u8g2.setFont(F_BIG);
     u8g2.drawStr(10, 132, data.clock);
+    if (data.wxText[0]) {
+      u8g2.setFont(F_MID);
+      u8g2.drawUTF8(210, 118, data.wxText);
+    }
     u8g2.setFont(F_MID);
     u8g2.drawUTF8(12, 168, data.datecn);
     u8g2.setFont(F_ASCII);
     u8g2.drawStr(12, 190, "no pending alerts");
   } else {
-    // compact clock top-left, date to its right, notifications below
+    // compact clock top-left, date + weather to its right, notifications below
     u8g2.setFont(F_BIG);
     u8g2.drawStr(8, 80, data.clock);
     int cw = u8g2.getStrWidth(data.clock);
     u8g2.setFont(F_MID);
     u8g2.drawUTF8(16 + cw, 52, data.datecn);
+    if (data.wxText[0]) {
+      int ww = u8g2.getUTF8Width(data.wxText);
+      u8g2.drawUTF8(W - ww - 8, 52, data.wxText);
+    }
     u8g2.setFont(F_CJK);
     snprintf(buf, sizeof(buf), "通知 %d 条", data.nn);
     u8g2.drawUTF8(16 + cw, 80, buf);
@@ -592,8 +600,8 @@ bool renderIfChanged(const char* newHash) {
 }
 
 void buildHash(char* out, size_t n) {
-  snprintf(out, n, "%d|%s|%s|%.0f|%.0f|%d|%d|%d|%d|", page, data.clock, data.datecn,
-           data.gpt5h, data.gptWeek,
+  snprintf(out, n, "%d|%s|%s|%s|%.0f|%.0f|%d|%d|%d|%d|", page, data.clock, data.datecn,
+           data.wxText, data.gpt5h, data.gptWeek,
            (int)data.claudeTok, (int)data.piTok, (int)(data.dshBalance * 100),
            data.procClaude + data.procCodex + data.procPi);
   size_t len = strlen(out);

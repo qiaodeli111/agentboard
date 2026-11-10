@@ -52,6 +52,9 @@ DEFAULTS = {
     "dsh_dir": str(HOME / ".dsh" / "sessions"),
     "dsh_credentials": str(HOME / ".dsh" / ".credentials.yaml"),
     "dsh_balance_interval_sec": 300,
+    "weather_lat": 22.5431,          # Shenzhen
+    "weather_lon": 114.0579,
+    "weather_interval_sec": 3600,
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -195,6 +198,7 @@ class Collector:
     quota_codex = {}   # latest ChatGPT rate_limits snapshot across codex files
     quota_limited = False   # empty-limits events seen => 5h window capped
     dsh_balance = {}   # {"balance": float, "bonus": float, "currency": "CNY", "ts": ...}
+    weather = {}       # {"text": "24℃ 多云", "ts": ...}
 
     def __init__(self):
         self.files = {}            # path -> FileState
@@ -955,6 +959,7 @@ def build_snapshot(col: Collector):
         "clock": now.strftime("%H:%M"),
         "date": now.strftime("%m-%d"),
         "date_cn": f"{now.month}月{now.day}日 {weekday}",
+        "weather": Collector.weather or None,
         "host": socket.gethostname(),
         "shown": shown,
         "agents": {k: v for k, v in sorted(per_agent.items())},
@@ -1000,6 +1005,40 @@ def dsh_balance_loop():
         time.sleep(CFG["dsh_balance_interval_sec"])
 
 
+WMO_TEXT = {0: "晴", 1: "多云", 2: "多云", 3: "阴", 45: "雾", 48: "雾",
+            51: "毛毛雨", 53: "毛毛雨", 55: "毛毛雨", 56: "冻雨", 57: "冻雨",
+            61: "雨", 63: "雨", 65: "大雨", 66: "冻雨", 67: "冻雨",
+            71: "雪", 73: "雪", 75: "大雪", 77: "小雪",
+            80: "阵雨", 81: "阵雨", 82: "强阵雨", 85: "阵雪", 86: "阵雪",
+            95: "雷雨", 96: "雷雨", 99: "雷雨"}
+
+
+def fetch_weather():
+    """Open-Meteo current conditions, no API key."""
+    url = (f"https://api.open-meteo.com/v1/forecast"
+           f"?latitude={CFG['weather_lat']}&longitude={CFG['weather_lon']}"
+           f"&current=temperature_2m,weather_code&timezone=Asia%2FShanghai")
+    with urllib.request.urlopen(url, timeout=10) as r:
+        j = json.loads(r.read().decode("utf-8"))
+    cur = j.get("current") or {}
+    t = cur.get("temperature_2m")
+    code = cur.get("weather_code")
+    if t is None:
+        return {}
+    return {"text": f"{t:.0f}℃ {WMO_TEXT.get(code, '—')}", "ts": time.time()}
+
+
+def weather_loop():
+    while True:
+        try:
+            w = fetch_weather()
+            if w:
+                Collector.weather = w
+        except Exception as e:
+            print(f"[agentboard] weather error: {e}", flush=True)
+        time.sleep(CFG["weather_interval_sec"])
+
+
 def refresher():
     col = Collector()
     global SNAPSHOT
@@ -1025,7 +1064,7 @@ SERIAL_GLOBS = ["/dev/cu.usbmodem*"]
 
 def wire_payload(snap):
     """Trimmed snapshot for the display (it only uses these keys)."""
-    w = {k: snap[k] for k in ("generated_at", "clock", "date", "date_cn", "host",
+    w = {k: snap[k] for k in ("generated_at", "clock", "date", "date_cn", "weather", "host",
                               "shown", "quota", "procs", "models", "notifs") if k in snap}
     return json.dumps(w, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
 
@@ -1172,7 +1211,7 @@ async function tick(){
  if(q.codex){const c=q.codex;h+=`<h2>ChatGPT 额度 (${c.plan||'?'})</h2>`;
   if(c.primary)h+=`<div>5h 窗口 ${bar(c.primary.used_percent)} <span class=mut>重置 ${new Date(c.primary.resets_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span></div>`;
   if(c.secondary)h+=`<div>每周 ${bar(c.secondary.used_percent)}</div>`;}
- if(q.claude){const c=q.claude;h+=`<h2>Claude 今日 (≈)</h2><div>${fmtT(c.today_tokens)} tokens · $${c.today_cost} · ${c.sessions_today} 会话</div>`;
+ if(q.claude){const c=q.claude;h+=`<h2>Claude 今日 (≈)</h2><div>${fmtT(c.today_tokens)} tokens · ${c.sessions_today} 会话</div>`;
   if(c.by_model&&c.by_model.length)h+=`<div class=mut>${c.by_model.map(([m,t])=>m+': '+fmtT(t)).join(' · ')}</div>`;}
  if(q.pi){const p=q.pi;h+=`<h2>pi 今日</h2><div>${fmtT(p.today_tokens)} tokens · ${p.sessions_today} 会话</div>`;}
  if(q.dsh){const p=q.dsh;h+=`<h2>DSH (DeepSeek Harness)</h2><div>余额 ¥${(p.balance||0).toFixed(2)}${p.bonus?` + 赠送 ¥${p.bonus.toFixed(2)}`:''} · 今日 ${fmtT(p.today_tokens)} tokens · ${p.sessions_today} 会话</div>`;}
@@ -1225,6 +1264,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     threading.Thread(target=refresher, daemon=True).start()
     threading.Thread(target=dsh_balance_loop, daemon=True).start()
+    threading.Thread(target=weather_loop, daemon=True).start()
     threading.Thread(target=serial_pusher, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), Handler)
     print(f"[agentboard] serving on http://0.0.0.0:{CFG['port']}  (dashboard /, api /api/status, "
