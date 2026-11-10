@@ -22,11 +22,18 @@ import sys
 import termios
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOME = Path.home()
+
+try:
+    from compression import zstd          # py3.14+: dsh sessions are zstd jsonl
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
 
 # ---------------------------------------------------------------- config
 
@@ -42,6 +49,9 @@ DEFAULTS = {
     "notif_file": str(HOME / "agentboard" / "server" / "notifs.json"),
     "notif_max": 20,
     "codex_imports_file": str(HOME / ".codex" / "external_agent_session_imports.json"),
+    "dsh_dir": str(HOME / ".dsh" / "sessions"),
+    "dsh_credentials": str(HOME / ".dsh" / ".credentials.yaml"),
+    "dsh_balance_interval_sec": 300,
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -184,6 +194,7 @@ def iter_new_lines(path, st, max_first_read=32 * 1024 * 1024):
 class Collector:
     quota_codex = {}   # latest ChatGPT rate_limits snapshot across codex files
     quota_limited = False   # empty-limits events seen => 5h window capped
+    dsh_balance = {}   # {"balance": float, "bonus": float, "currency": "CNY", "ts": ...}
 
     def __init__(self):
         self.files = {}            # path -> FileState
@@ -510,6 +521,86 @@ class Collector:
         m.setdefault("project", slug_to_project(slug))
         m.setdefault("id", path.stem)
 
+    # ---- DeepSeek Harness (dsh) ----
+
+    def scan_dsh(self):
+        if not HAS_ZSTD:
+            return
+        root = Path(CFG["dsh_dir"])
+        if not root.is_dir():
+            return
+        cutoff = time.time() - CFG["history_hours"] * 3600
+        for p in root.glob("*/*/session.v4.jsonl.zstd"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            st = self._touch(p, "dsh")
+            m = st.meta
+            if m.get("_mtime") == mtime:
+                continue                    # unchanged since last parse
+            m["agent"] = "dsh"
+            m["_mtime"] = mtime
+            self._dsh_file(str(p), m)
+
+    def _dsh_file(self, path, m):
+        started = last = None
+        try:
+            raw = zstd.open(path, "rb").read().decode("utf-8", errors="replace")
+        except Exception:
+            return
+        # full-file re-parse: clear previous accounting first
+        for k in ("tokens", "tok_today", "models", "turns"):
+            m.pop(k, None)
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            t = d.get("type")
+            tm = d.get("time")
+            ts = tm / 1000 if isinstance(tm, (int, float)) else None
+            if ts:
+                if started is None or ts < started:
+                    started = ts
+                if last is None or ts > last:
+                    last = ts
+            p = d.get("data") or {}
+            if t == "session":
+                m["id"] = d.get("id") or m.get("id")
+                if d.get("cwd"):
+                    m["project"] = project_from_cwd(d["cwd"])
+            elif t == "session/title":
+                s = clean_title(p.get("title"))
+                if s:
+                    m["title"] = s
+            elif t == "request/context":
+                if p.get("model"):
+                    m["model"] = p["model"]
+                if p.get("provider"):
+                    m["provider"] = p["provider"]
+            elif t == "assistant/message":
+                u = p.get("usage") or {}
+                tin = u.get("inputTokens", 0)
+                tout = u.get("outputTokens", 0)
+                if tin or tout:
+                    m["tokens"] = m.get("tokens", 0) + tin + tout
+                    m["turns"] = m.get("turns", 0) + 1
+                    if ts and ts >= self.today:
+                        m["tok_today"] = m.get("tok_today", 0) + tin + tout
+                        mdl = m.get("model") or "?"
+                        mm = m.setdefault("models", {})
+                        mm[mdl] = mm.get(mdl, 0) + tin + tout
+        if started:
+            m["started"] = int(started)
+        if last:
+            m["last"] = int(last)
+        m.setdefault("project", "dsh")
+
     # ---- ChatGPT desktop app thread index (best effort) ----
 
     def scan_chatgpt_index(self):
@@ -734,6 +825,7 @@ def build_snapshot(col: Collector):
     col.scan_claude()
     col.scan_codex()
     col.scan_pi()
+    col.scan_dsh()
     listed = col.tag_states()
 
     # stale index entries only for threads we don't already have from rollouts
@@ -841,6 +933,20 @@ def build_snapshot(col: Collector):
     quota["pi"] = {
         "today_tokens": int(pi_tok), "sessions_today": pi_today,
     }
+    dsh_tok = dsh_today = 0
+    for st in col.files.values():
+        m = st.meta
+        if m.get("agent") != "dsh":
+            continue
+        if (m.get("last") or m.get("started") or 0) >= col.today:
+            dsh_today += 1
+        dsh_tok += m.get("tok_today", 0)
+    b = Collector.dsh_balance
+    quota["dsh"] = {
+        "balance": b.get("balance"), "bonus": b.get("bonus"),
+        "currency": b.get("currency", "CNY"),
+        "today_tokens": int(dsh_tok), "sessions_today": dsh_today,
+    }
 
     now = datetime.now()
     weekday = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][now.weekday()]
@@ -857,6 +963,41 @@ def build_snapshot(col: Collector):
         "notifs": NOTIFS.snapshot(),
         "procs": {**counts, **flags},
     }
+
+
+def fetch_dsh_balance():
+    """DeepSeek Harness account wallet balance via the Platform API."""
+    try:
+        cred = open(CFG["dsh_credentials"]).read()
+        mm = re.search(r"deepseek-account-platform/default:.*?token:\s*(\S+)", cred, re.S)
+        if not mm:
+            return {}
+        token = mm.group(1).strip().strip('"')
+        req = urllib.request.Request(
+            "https://platform.deepseek.com/api/v0/users/get_user_summary",
+            headers={"x-dsh-auth-token": token, "Accept": "application/json",
+                     "User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            j = json.loads(r.read().decode("utf-8"))
+        biz = ((j.get("data") or {}).get("biz_data")) or {}
+        normal = sum(float(w["balance"]) for w in biz.get("normal_wallets", []) if w.get("balance"))
+        bonus = sum(float(w["balance"]) for w in biz.get("bonus_wallets", []) if w.get("balance"))
+        cur = (biz.get("normal_wallets") or [{}])[0].get("currency", "CNY")
+        return {"balance": normal, "bonus": bonus, "currency": cur, "ts": time.time()}
+    except Exception as e:
+        print(f"[agentboard] dsh balance error: {e}", flush=True)
+        return {}
+
+
+def dsh_balance_loop():
+    while True:
+        try:
+            b = fetch_dsh_balance()
+            if b:
+                Collector.dsh_balance = b
+        except Exception as e:
+            print(f"[agentboard] dsh balance error: {e}", flush=True)
+        time.sleep(CFG["dsh_balance_interval_sec"])
 
 
 def refresher():
@@ -1007,7 +1148,7 @@ DASHBOARD = """<!doctype html><html lang=zh><meta charset=utf-8>
 <table id=t></table>
 <p class=mut id=procs></p>
 <script>
-const AG={claude:'✳ Claude',codex:'⌨ Codex',pi:'π pi',chatgpt:'💬 ChatGPT'};
+const AG={claude:'✳ Claude',codex:'⌨ Codex',pi:'π pi',chatgpt:'💬 ChatGPT',dsh:'🐋 DSH'};
 const ST={running:'● 运行中',idle:'◐ 空闲',done:'○ 结束'};
 function fmtAge(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';return Math.floor(s/86400)+'d'}
 function fmtT(n){if(n>1e6)return (n/1e6).toFixed(1)+'M';if(n>1e3)return (n/1e3).toFixed(0)+'k';return n}
@@ -1034,6 +1175,7 @@ async function tick(){
  if(q.claude){const c=q.claude;h+=`<h2>Claude 今日 (≈)</h2><div>${fmtT(c.today_tokens)} tokens · $${c.today_cost} · ${c.sessions_today} 会话</div>`;
   if(c.by_model&&c.by_model.length)h+=`<div class=mut>${c.by_model.map(([m,t])=>m+': '+fmtT(t)).join(' · ')}</div>`;}
  if(q.pi){const p=q.pi;h+=`<h2>pi 今日</h2><div>${fmtT(p.today_tokens)} tokens · ${p.sessions_today} 会话</div>`;}
+ if(q.dsh){const p=q.dsh;h+=`<h2>DSH (DeepSeek Harness)</h2><div>余额 ¥${(p.balance||0).toFixed(2)}${p.bonus?` + 赠送 ¥${p.bonus.toFixed(2)}`:''} · 今日 ${fmtT(p.today_tokens)} tokens · ${p.sessions_today} 会话</div>`;}
  document.getElementById('quota').innerHTML=h;
  const rows=(d.shown||[]).map(s=>`<tr><td>${AG[s.agent]||s.agent}</td><td class=${s.state}>${ST[s.state]}</td><td>${s.project}</td><td>${s.title}</td><td class=mut>${s.model||''}${s.originator?'<br>'+s.originator:''}</td><td class=mut>${fmtAge(s.age)}前</td></tr>`).join('');
  document.getElementById('t').innerHTML='<tr><th>Agent</th><th>状态</th><th>项目</th><th>标题</th><th>模型</th><th>最近活动</th></tr>'+rows;
@@ -1082,6 +1224,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     threading.Thread(target=refresher, daemon=True).start()
+    threading.Thread(target=dsh_balance_loop, daemon=True).start()
     threading.Thread(target=serial_pusher, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), Handler)
     print(f"[agentboard] serving on http://0.0.0.0:{CFG['port']}  (dashboard /, api /api/status, "

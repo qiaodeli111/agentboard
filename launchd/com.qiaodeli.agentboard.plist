@@ -6,7 +6,7 @@
     <string>com.qiaodeli.agentboard</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/bin/python3</string>
         <string>/Users/qiaodeli/agentboard/server/agentboard.py</string>
     </array>
     <key>RunAtLoad</key>

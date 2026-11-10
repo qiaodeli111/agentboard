@@ -77,6 +77,7 @@ struct BoardData {
   bool hasCodex; float gpt5h, gptWeek; int32_t gptResetIn; int32_t gptSnapAge; bool gptLimited; char gptPlan[8];
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
   bool hasPi; float piTok; int piSessions;
+  bool hasDsh; float dshBalance, dshBonus, dshTok; int dshSessions;
   int procClaude, procCodex, procPi; bool chatgptApp;
 };
 BoardData data;
@@ -97,6 +98,7 @@ const char* agentShort(const char* a) {
   if (!strcmp(a, "codex"))  return "CODEX";
   if (!strcmp(a, "pi"))     return "PI";
   if (!strcmp(a, "chatgpt")) return "CHATGPT";
+  if (!strcmp(a, "dsh"))    return "DSH";
   return a;
 }
 
@@ -162,6 +164,15 @@ void drawAgentIcon(int x, int yTop, const char* a) {
     u8g2.drawRFrame(x, yTop + 1, 13, 8, 2);
     u8g2.drawLine(x + 3, yTop + 9, x + 3, yTop + 11);
     u8g2.drawLine(x + 3, yTop + 11, x + 6, yTop + 9);
+  } else if (!strcmp(a, "dsh")) {
+    // deepseek whale: rounded body + tail fin + eye
+    u8g2.drawDisc(x + 5, yTop + 6, 4);
+    u8g2.drawLine(x + 9, yTop + 6, x + 12, yTop + 3);
+    u8g2.drawLine(x + 9, yTop + 6, x + 12, yTop + 8);
+    u8g2.drawLine(x + 12, yTop + 3, x + 12, yTop + 8);
+    u8g2.setDrawColor(0);
+    u8g2.drawPixel(x + 3, yTop + 5);
+    u8g2.setDrawColor(1);
   } else {
     u8g2.drawFrame(x, yTop, 11, 11);
     u8g2.drawLine(x + 2, yTop + 5, x + 8, yTop + 5);
@@ -217,6 +228,14 @@ bool extractData(const String& payload) {
   if (nd.hasPi) {
     nd.piTok = (float)((double)(pi["today_tokens"] | 0));
     nd.piSessions = pi["sessions_today"] | 0;
+  }
+  JsonObject ds = doc["quota"]["dsh"];
+  nd.hasDsh = !ds.isNull();
+  if (nd.hasDsh) {
+    nd.dshBalance = (float)((double)(ds["balance"] | 0));
+    nd.dshBonus = (float)((double)(ds["bonus"] | 0));
+    nd.dshTok = (float)((double)(ds["today_tokens"] | 0));
+    nd.dshSessions = ds["sessions_today"] | 0;
   }
 
   int i = 0;
@@ -391,6 +410,22 @@ void drawQuota(int yTop) {
     u8g2.drawStr(56, y + 10, buf);
     snprintf(buf, sizeof(buf), "%d sess", data.piSessions);
     u8g2.drawStr(126, y + 10, buf);
+    y += 16;
+  }
+  if (data.hasDsh) {
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(4, y + 10, "DSH");
+    snprintf(buf, sizeof(buf), "¥%.2f", (double)data.dshBalance);
+    u8g2.drawStr(34, y + 10, buf);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(96, y + 10, "今日");
+    u8g2.setFont(F_ASCII);
+    char tok[16];
+    fmtTokens(data.dshTok, tok, sizeof(tok));
+    snprintf(buf, sizeof(buf), "%s tok", tok);
+    u8g2.drawStr(128, y + 10, buf);
+    snprintf(buf, sizeof(buf), "%d sess", data.dshSessions);
+    u8g2.drawStr(198, y + 10, buf);
   }
 }
 
@@ -400,8 +435,8 @@ void renderNotifs() {
   char buf[72];
   drawHeader();
 
-  // quota block pinned above the footer: codex 18 + claude 16 + pi ~16 + gaps
-  int quotaTop = H - 22 - 18 - 16 - 16 - 8;      // ~ 300-80 = 220
+  // quota block pinned above the footer: codex 18 + claude 16 + pi 16 + dsh 16 + gaps
+  int quotaTop = H - 22 - 18 - 16 - 16 - 16 - 8;      // ~ 204
   int notifBottom = quotaTop - 8;
 
   if (data.nn == 0) {
@@ -554,9 +589,9 @@ bool renderIfChanged(const char* newHash) {
 }
 
 void buildHash(char* out, size_t n) {
-  snprintf(out, n, "%d|%s|%s|%.0f|%.0f|%d|%d|%d|", page, data.clock, data.datecn,
+  snprintf(out, n, "%d|%s|%s|%.0f|%.0f|%d|%d|%d|%d|", page, data.clock, data.datecn,
            data.gpt5h, data.gptWeek,
-           (int)data.claudeTok, (int)data.piTok,
+           (int)data.claudeTok, (int)data.piTok, (int)(data.dshBalance * 100),
            data.procClaude + data.procCodex + data.procPi);
   size_t len = strlen(out);
   for (int i = 0; i < data.n && len < n - 40; i++) {
