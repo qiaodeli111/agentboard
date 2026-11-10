@@ -296,6 +296,7 @@ class Collector:
                 m["tokens"] = m.get("tokens", 0) + tin + tout + cr + cw
                 if ts and ts >= self.today:
                     m["tok_today"] = m.get("tok_today", 0) + tin + tout + cr + cw
+                    m["cache_today"] = m.get("cache_today", 0) + cr + cw
                     c = cost_of(m.get("model"), tin, tout, cr, cw)
                     m["cost_today"] = m.get("cost_today", 0.0) + (c or 0.0)
                     mdl = msg.get("model") or "?"
@@ -437,11 +438,14 @@ class Collector:
                         # first sight: baseline. If the whole session began
                         # today, its full usage counts as today's.
                         m["last_total"] = total
+                        m["last_cached"] = tot.get("cached_input_tokens", 0)
                         if (m.get("started") or 0) >= self.today and total:
                             m["tok_today"] = m.get("tok_today", 0) + total
                             mdl = m.get("model") or "?"
                             md = m.setdefault("models", {})
                             md[mdl] = md.get(mdl, 0) + total
+                            m["cache_today"] = m.get("cache_today", 0) \
+                                + tot.get("cached_input_tokens", 0)
                     elif total > m["last_total"]:
                         delta = total - m["last_total"]
                         m["last_total"] = total
@@ -450,6 +454,11 @@ class Collector:
                             mdl = m.get("model") or "?"
                             md = m.setdefault("models", {})
                             md[mdl] = md.get(mdl, 0) + delta
+                            cached_total = tot.get("cached_input_tokens", 0)
+                            if cached_total > m.get("last_cached", 0):
+                                m["cache_today"] = m.get("cache_today", 0) \
+                                    + cached_total - m.get("last_cached", 0)
+                            m["last_cached"] = max(cached_total, m.get("last_cached", 0))
                 rl = p.get("rate_limits")
                 if rl and ts:
                     if (rl.get("primary") or {}).get("used_percent") is not None:
@@ -511,13 +520,16 @@ class Collector:
                 if role == "assistant":
                     m["turns"] = m.get("turns", 0) + 1
                 u = msg.get("usage") or {}
-                tin = u.get("input", 0) + u.get("cache_read", 0) + u.get("cache_write", 0)
+                cr = u.get("cache_read", 0)
+                cwr = u.get("cache_write", 0)
+                tin = u.get("input", 0) + cr + cwr
                 tout = u.get("output", 0)
                 if tin or tout:
                     m["tokens"] = m.get("tokens", 0) + tin + tout
                     mts = ts or iso_ts(str(msg.get("timestamp") or ""))
                     if mts and mts >= self.today:
                         m["tok_today"] = m.get("tok_today", 0) + tin + tout
+                        m["cache_today"] = m.get("cache_today", 0) + cr + cwr
                         mdl = m.get("model") or "?"
                         models = m.setdefault("models", {})
                         models[mdl] = models.get(mdl, 0) + tin + tout
@@ -597,6 +609,8 @@ class Collector:
                     m["turns"] = m.get("turns", 0) + 1
                     if ts and ts >= self.today:
                         m["tok_today"] = m.get("tok_today", 0) + tin + tout
+                        m["cache_today"] = m.get("cache_today", 0) \
+                            + u.get("cacheReadTokens", 0) + u.get("cacheWriteTokens", 0)
                         mdl = m.get("model") or "?"
                         mm = m.setdefault("models", {})
                         mm[mdl] = mm.get(mdl, 0) + tin + tout
@@ -900,14 +914,21 @@ def build_snapshot(col: Collector):
     q = Collector.quota_codex
     if q:
         d = q["data"]
+        codex_cache = 0
+        for st in col.files.values():
+            mm = st.meta
+            if mm.get("agent") in ("codex", "chatgpt"):
+                codex_cache += mm.get("cache_today", 0)
         quota["codex"] = {
             "plan": d.get("plan_type"),
             "primary": d.get("primary"), "secondary": d.get("secondary"),
             "credits": d.get("credits"), "ts": q["ts"],
             "limited": Collector.quota_limited,
+            "today_cache": int(codex_cache),
         }
     tok = cost = 0.0
     n_today = 0
+    claude_cache = 0
     claude_models = {}
     for st in col.files.values():
         m = st.meta
@@ -916,6 +937,7 @@ def build_snapshot(col: Collector):
         if (m.get("last") or m.get("started") or 0) >= col.today:
             n_today += 1          # sessions active today (incl. started yesterday)
         t = m.get("tok_today", 0)
+        claude_cache += m.get("cache_today", 0)
         if t:
             tok += t
             cost += m.get("cost_today", 0.0)
@@ -923,11 +945,12 @@ def build_snapshot(col: Collector):
             claude_models[mdl] = claude_models.get(mdl, 0) + t
     quota["claude"] = {
         "today_tokens": int(tok), "today_cost": round(cost, 2),
+        "today_cache": int(claude_cache),
         "sessions_today": n_today,
         "by_model": sorted(claude_models.items(), key=lambda kv: -kv[1])[:3],
         "note": "estimate",
     }
-    pi_tok = 0
+    pi_tok = pi_cache = 0
     pi_today = 0
     for st in col.files.values():
         m = st.meta
@@ -940,10 +963,12 @@ def build_snapshot(col: Collector):
         if not t and (m.get("started") or 0) >= col.today:
             t = m.get("tokens", 0)   # started today, no per-message timestamps
         pi_tok += t
+        pi_cache += m.get("cache_today", 0)
     quota["pi"] = {
         "today_tokens": int(pi_tok), "sessions_today": pi_today,
+        "today_cache": int(pi_cache),
     }
-    dsh_tok = dsh_today = 0
+    dsh_tok = dsh_today = dsh_cache = 0
     for st in col.files.values():
         m = st.meta
         if m.get("agent") != "dsh":
@@ -951,11 +976,13 @@ def build_snapshot(col: Collector):
         if (m.get("last") or m.get("started") or 0) >= col.today:
             dsh_today += 1
         dsh_tok += m.get("tok_today", 0)
+        dsh_cache += m.get("cache_today", 0)
     b = Collector.dsh_balance
     quota["dsh"] = {
         "balance": b.get("balance"), "bonus": b.get("bonus"),
         "currency": b.get("currency", "CNY"),
         "today_tokens": int(dsh_tok), "sessions_today": dsh_today,
+        "today_cache": int(dsh_cache),
     }
 
     now = datetime.now()

@@ -79,6 +79,7 @@ struct BoardData {
   bool hasClaude; float claudeTok; float claudeCost; int claudeSessions;
   bool hasPi; float piTok; int piSessions;
   bool hasDsh; float dshBalance, dshBonus, dshTok; int dshSessions;
+  float claudeCache, gptCache, piCache, dshCache;
   int procClaude, procCodex, procPi, procDsh; bool chatgptApp, dshApp;
 };
 BoardData data;
@@ -229,12 +230,15 @@ bool extractData(const String& payload) {
     nd.claudeTok = (float)((double)(cl["today_tokens"] | 0));
     nd.claudeCost = (float)((double)(cl["today_cost"] | 0));
     nd.claudeSessions = cl["sessions_today"] | 0;
+    nd.claudeCache = (float)((double)(cl["today_cache"] | 0));
   }
+  nd.gptCache = (float)((double)(doc["quota"]["codex"]["today_cache"] | 0));
   JsonObject pi = doc["quota"]["pi"];
   nd.hasPi = !pi.isNull();
   if (nd.hasPi) {
     nd.piTok = (float)((double)(pi["today_tokens"] | 0));
     nd.piSessions = pi["sessions_today"] | 0;
+    nd.piCache = (float)((double)(pi["today_cache"] | 0));
   }
   JsonObject ds = doc["quota"]["dsh"];
   nd.hasDsh = !ds.isNull();
@@ -243,6 +247,7 @@ bool extractData(const String& payload) {
     nd.dshBonus = (float)(ds["bonus"] | 0.0);
     nd.dshTok = (float)((double)(ds["today_tokens"] | 0));
     nd.dshSessions = ds["sessions_today"] | 0;
+    nd.dshCache = (float)((double)(ds["today_cache"] | 0));
   }
 
   int i = 0;
@@ -446,6 +451,27 @@ void drawQuota(int yTop) {
     snprintf(buf, sizeof(buf), "%d sess", data.dshSessions);
     u8g2.drawStr(200, y + 10, buf);
   }
+
+  // cache usage row: where the tokens really went
+  y += 16;
+  u8g2.setFont(F_CJK);
+  u8g2.drawUTF8(4, y + 10, "缓存");
+  u8g2.setFont(F_ASCII);
+  int cx = 34;
+  const struct { const char* a; float v; } cacheRows[4] = {
+    {"claude", data.claudeCache}, {"chatgpt", data.gptCache},
+    {"pi", data.piCache}, {"dsh", data.dshCache},
+  };
+  for (int i = 0; i < 4; i++) {
+    if (cacheRows[i].v < 1000) continue;          // skip near-zero entries
+    char cbuf[16];
+    fmtTokens(cacheRows[i].v, cbuf, sizeof(cbuf));
+    drawAgentIcon(cx, y, cacheRows[i].a);
+    u8g2.setFont(F_ASCII);
+    u8g2.drawStr(cx + 16, y + 10, cbuf);
+    cx += 16 + u8g2.getStrWidth(cbuf) + 12;
+    if (cx > W - 30) break;
+  }
 }
 
 // ---------------- ui: page 0 notifications + big clock + quota ----------------
@@ -454,8 +480,9 @@ void renderNotifs() {
   char buf[72];
   drawHeader();
 
-  // quota block pinned above the footer: codex 18 + claude 16 + pi 16 + dsh 16 + gaps
-  int quotaTop = H - 22 - 18 - 16 - 16 - 16 - 8;      // ~ 204
+  // quota block pinned above the footer: codex 18 + claude 16 + pi 16 + dsh 16
+  // + cache 16 + gaps
+  int quotaTop = H - 22 - 18 - 16 - 16 - 16 - 16 - 8;      // ~ 188
   int notifBottom = quotaTop - 8;
 
   if (data.nn == 0) {
