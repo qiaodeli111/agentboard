@@ -320,9 +320,10 @@ void drawFooter(int activePage) {
   char buf[72];
   u8g2.setFont(F_ASCII);
   u8g2.drawHLine(0, H - 20, W);
-  // page tabs, active one inverted
-  const char* tabs[4] = {"1 通知", "2 会话", "3 模型", "4 番茄"};
-  int x = 6;
+  // page tabs, active one inverted (no numeric prefixes: 4 tabs + status
+  // icons must fit in 400px)
+  const char* tabs[4] = {"通知", "会话", "模型", "番茄"};
+  int x = 4;
   for (int i = 0; i < 4; i++) {
     u8g2.setFont(F_CJK);
     int w = u8g2.getUTF8Width(tabs[i]) + 8;
@@ -334,7 +335,7 @@ void drawFooter(int activePage) {
     } else {
       u8g2.drawUTF8(x + 4, H - 6, tabs[i]);
     }
-    x += w + 6;
+    x += w + 4;
   }
   // right side: counts
   u8g2.setFont(F_ASCII);
@@ -354,6 +355,7 @@ void drawFooter(int activePage) {
     const char* order[4] = {"claude", "codex", "pi", "dsh"};
     int counts[4] = {data.procClaude, data.procCodex, data.procPi, data.procDsh};
     for (int i = 3; i >= 0; i--) {
+      if (counts[i] <= 0) continue;               // zero-count: save footer space
       char cbuf[6];
       snprintf(cbuf, sizeof(cbuf), "%d", counts[i]);
       int seg = 14 + 3 + u8g2.getStrWidth(cbuf) + 7;
