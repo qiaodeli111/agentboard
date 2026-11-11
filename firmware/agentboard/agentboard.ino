@@ -80,6 +80,9 @@ struct BoardData {
   bool hasPi; float piTok; int piSessions;
   bool hasDsh; float dshBalance, dshBonus, dshTok; int dshSessions;
   float claudeCache, gptCache, piCache, dshCache;
+  // pomodoro
+  char pomoMode[8]; int pomoRemaining; bool pomoPaused;
+  int pomoRound, pomoSet, pomoTodayN, pomoTotalN, pomoTodayMin, pomoBreakMin;
   int procClaude, procCodex, procPi, procDsh; bool chatgptApp, dshApp;
 };
 BoardData data;
@@ -92,7 +95,7 @@ uint32_t lastPoll = 0, lastPaint = 0;
 String lastHash;
 #endif
 
-int page = 0;                       // 0 notifs, 1 sessions, 2 models
+int page = 0;                       // 0 notifs, 1 sessions, 2 models, 3 pomodoro
 
 // ---------------- helpers ----------------
 const char* agentShort(const char* a) {
@@ -249,6 +252,16 @@ bool extractData(const String& payload) {
     nd.dshSessions = ds["sessions_today"] | 0;
     nd.dshCache = (float)((double)(ds["today_cache"] | 0));
   }
+  JsonObject pm = doc["pomo"];
+  strlcpy(nd.pomoMode, pm["mode"] | "idle", sizeof(nd.pomoMode));
+  nd.pomoRemaining = pm["remaining"] | 0;
+  nd.pomoPaused = pm["paused"] | false;
+  nd.pomoRound = pm["round"] | 1;
+  nd.pomoSet = pm["set"] | 4;
+  nd.pomoTodayN = pm["today_n"] | 0;
+  nd.pomoTotalN = pm["total_n"] | 0;
+  nd.pomoTodayMin = pm["today_min"] | 0;
+  nd.pomoBreakMin = pm["break_min"] | 5;
 
   int i = 0;
   for (JsonObject item : doc["shown"].as<JsonArray>()) {
@@ -308,9 +321,9 @@ void drawFooter(int activePage) {
   u8g2.setFont(F_ASCII);
   u8g2.drawHLine(0, H - 20, W);
   // page tabs, active one inverted
-  const char* tabs[3] = {"1 通知", "2 会话", "3 模型"};
+  const char* tabs[4] = {"1 通知", "2 会话", "3 模型", "4 番茄"};
   int x = 6;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     u8g2.setFont(F_CJK);
     int w = u8g2.getUTF8Width(tabs[i]) + 8;
     if (i == activePage) {
@@ -619,11 +632,59 @@ void renderModels() {
   u8g2.sendBuffer();
 }
 
+// ---------------- ui: page 3 pomodoro ----------------
+void renderPomo() {
+  u8g2.clearBuffer();
+  char buf[80];
+  drawHeader();
+
+  // set progress dots (filled = tomatoes done in the current set)
+  int doneInSet = (data.pomoTodayN % data.pomoSet);
+  if (data.pomoRound > data.pomoSet) doneInSet = data.pomoSet;   // long-break phase
+  for (int i = 0; i < data.pomoSet; i++) {
+    int dx = W - 30 - i * 22;
+    if (i < doneInSet) u8g2.drawDisc(dx, 14, 5);
+    else u8g2.drawCircle(dx, 14, 5);
+  }
+
+  // state line
+  u8g2.setFont(F_CJK);
+  const char* st;
+  if (!strcmp(data.pomoMode, "focus"))      st = data.pomoPaused ? "专注中（已暂停）" : "专注中";
+  else if (!strcmp(data.pomoMode, "break")) st = data.pomoBreakMin >= 15 ? "长休息" : "休息一下";
+  else                                      st = "待开始 · 按右键开始";
+  u8g2.drawUTF8(10, 42, st);
+  u8g2.setFont(F_ASCII);
+  snprintf(buf, sizeof(buf), "set %d/4", data.pomoRound);
+  u8g2.drawStr(150, 42, buf);
+
+  // big countdown
+  int rem = data.pomoRemaining;
+  snprintf(buf, sizeof(buf), "%02d:%02d", rem / 60, rem % 60);
+  u8g2.setFont(F_BIG);
+  u8g2.drawStr(10, 130, buf);
+
+  // stats
+  u8g2.setFont(F_CJK);
+  snprintf(buf, sizeof(buf), "今日 %d 个 · 累计 %d 个 · 专注 %d 分钟",
+           data.pomoTodayN, data.pomoTotalN, data.pomoTodayMin);
+  u8g2.drawUTF8(10, 176, buf);
+  if (!strcmp(data.pomoMode, "break")) {
+    u8g2.drawUTF8(10, 200, "离开屏幕，喝口水，看看远处");
+  }
+
+  u8g2.setFont(F_ASCII);
+  u8g2.drawStr(10, H - 30, "R: start/pause   R-long: reset   L: page/L-long: ack");
+  drawFooter(3);
+  u8g2.sendBuffer();
+}
+
 void render() {
   switch (page) {
     case 0: renderNotifs(); break;
     case 1: renderSessions(); break;
-    default: renderModels(); break;
+    case 2: renderModels(); break;
+    default: renderPomo(); break;
   }
 }
 
@@ -636,10 +697,11 @@ bool renderIfChanged(const char* newHash) {
 }
 
 void buildHash(char* out, size_t n) {
-  snprintf(out, n, "%d|%s|%s|%s|%.0f|%.0f|%d|%d|%d|%d|", page, data.clock, data.datecn,
+  snprintf(out, n, "%d|%s|%s|%s|%.0f|%.0f|%d|%d|%d|%d|%s%d/%d|", page, data.clock, data.datecn,
            data.wxText, data.gpt5h, data.gptWeek,
            (int)data.claudeTok, (int)data.piTok, (int)(data.dshBalance * 100),
-           data.procClaude + data.procCodex + data.procPi);
+           data.procClaude + data.procCodex + data.procPi,
+           data.pomoMode, data.pomoRemaining, data.pomoTodayN);
   size_t len = strlen(out);
   for (int i = 0; i < data.n && len < n - 40; i++) {
     snprintf(out + len, n - len, "%s%d|%.14s|", data.s[i].state, data.s[i].age / 60,
@@ -654,40 +716,53 @@ void buildHash(char* out, size_t n) {
   }
 }
 
-// ---------------- button ----------------
-void handleButton() {
-  static uint32_t pressStart = 0;
-  static bool longFired = false;
-  // either KEY (GPIO18) or BOOT (GPIO0), pressed = LOW
-  bool pressed = digitalRead(KEY_PIN) == LOW || digitalRead(BOOT_PIN) == LOW;
-  uint32_t now = millis();
+// ---------------- buttons ----------------
+// facing the screen: LEFT = BOOT (GPIO0) = page / long-press acks notifs
+//                    RIGHT = KEY (GPIO18) = pomodoro start/pause / long reset
+struct BtnState {
+  uint32_t pressStart;
+  bool longFired;
+};
+BtnState btnLeft, btnRight;
 
-  if (pressed && pressStart == 0) {
-    pressStart = now;
-    longFired = false;
-  } else if (pressed && pressStart && !longFired && now - pressStart > 800) {
-    longFired = true;
-    Serial.print("ACK\n");          // tell the Mac to clear notifications
-    // immediate visual confirmation the press registered
-    if (lastDataMs) {
-      u8g2.clearBuffer();
-      u8g2.drawBox(0, 0, W, H);
-      u8g2.setDrawColor(0);
-      u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(60, H / 2 + 6, "已发送清除，通知将消失…");
-      u8g2.setDrawColor(1);
-      u8g2.sendBuffer();
-    }
-  } else if (!pressed && pressStart) {
-    if (!longFired && now - pressStart > 30 && now - pressStart < 800) {
-      if (page == 0) {
-        Serial.print("SEEN\n");      // leaving the notification page = viewed
+void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
+  if (pressed && b.pressStart == 0) {
+    b.pressStart = now;
+    b.longFired = false;
+  } else if (pressed && b.pressStart && !b.longFired && now - b.pressStart > 800) {
+    b.longFired = true;
+    if (isLeft) {
+      Serial.print("ACK\n");        // long-press left: clear notifications
+      if (lastDataMs) {
+        u8g2.clearBuffer();
+        u8g2.drawBox(0, 0, W, H);
+        u8g2.setDrawColor(0);
+        u8g2.setFont(F_CJK);
+        u8g2.drawUTF8(60, H / 2 + 6, "已发送清除，通知将消失…");
+        u8g2.setDrawColor(1);
+        u8g2.sendBuffer();
       }
-      page = (page + 1) % 3;
+    } else {
+      Serial.print("POMO_RST\n");   // long-press right: reset the tomato
+    }
+  } else if (!pressed && b.pressStart) {
+    if (!b.longFired && now - b.pressStart > 30 && now - b.pressStart < 800) {
+      if (isLeft) {
+        if (page == 0) Serial.print("SEEN\n");
+        page = (page + 1) % 4;
+      } else {
+        Serial.print("POMO\n");     // short-press right: start / pause / resume
+      }
       if (lastDataMs) render();
     }
-    pressStart = 0;
+    b.pressStart = 0;
   }
+}
+
+void handleButton() {
+  uint32_t now = millis();
+  stepButton(btnLeft, true, digitalRead(BOOT_PIN) == LOW, now);
+  stepButton(btnRight, false, digitalRead(KEY_PIN) == LOW, now);
 }
 
 // ---------------- setup / loop ----------------
@@ -714,6 +789,8 @@ void setup() {
   Serial.setRxBufferSize(16 * 1024);
   pinMode(KEY_PIN, INPUT_PULLUP);
   pinMode(BOOT_PIN, INPUT_PULLUP);
+  memset(&btnLeft, 0, sizeof(btnLeft));
+  memset(&btnRight, 0, sizeof(btnRight));
 #if USE_WIFI
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);

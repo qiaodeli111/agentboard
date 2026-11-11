@@ -56,6 +56,12 @@ DEFAULTS = {
     "weather_lon": 114.0579,
     "weather_interval_sec": 3600,
     "codex_state_file": str(HOME / "agentboard" / "server" / "codex_state.json"),
+    "pomo_file": str(HOME / "agentboard" / "server" / "pomo.json"),
+    "pomo_focus_min": 25,
+    "pomo_break_min": 5,
+    "pomo_long_break_min": 15,
+    "pomo_set_size": 4,
+    "pomo_sound": True,
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -1007,6 +1013,7 @@ def build_snapshot(col: Collector):
         "date": now.strftime("%m-%d"),
         "date_cn": f"{now.month}月{now.day}日 {weekday}",
         "weather": Collector.weather or None,
+        "pomo": POMO.snapshot(),
         "host": socket.gethostname(),
         "shown": shown,
         "agents": {k: v for k, v in sorted(per_agent.items())},
@@ -1015,6 +1022,145 @@ def build_snapshot(col: Collector):
         "notifs": NOTIFS.snapshot(),
         "procs": {**counts, **flags},
     }
+
+
+# ------------------------------------------------------------- pomodoro
+
+class Pomodoro:
+    """Server-side tomato timer: the display is a remote control (button
+    presses arrive as serial lines) and the Mac owns timing, sounds and
+    stats so nothing drifts or gets lost across reboots."""
+
+    def __init__(self):
+        self.mode = "idle"          # idle | focus | break
+        self.ends_at = None
+        self.paused = False
+        self.remaining = CFG["pomo_focus_min"] * 60
+        self.round = 1              # tomato within the current set
+        self.today = datetime.now().strftime("%Y-%m-%d")
+        self.today_n = 0
+        self.total_n = 0
+        self.today_min = 0
+        self._load()
+        self._rollover()
+
+    def _file(self):
+        try:
+            raw = json.load(open(CFG["pomo_file"]))
+            if isinstance(raw, dict):
+                return raw
+        except Exception:
+            pass
+        return {}
+
+    def _save(self):
+        try:
+            json.dump({"date": self.today, "today_n": self.today_n,
+                       "total_n": self.total_n, "today_min": self.today_min},
+                      open(CFG["pomo_file"], "w"))
+        except Exception:
+            pass
+
+    def _load(self):
+        d = self._file()
+        if d.get("date") == self.today:
+            self.today_n = d.get("today_n", 0)
+            self.today_min = d.get("today_min", 0)
+        self.total_n = d.get("total_n", 0)
+
+    def _rollover(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self.today:
+            self.today = today
+            self.today_n = 0
+            self.today_min = 0
+            self._save()
+
+    def _length(self):
+        if self.mode == "focus":
+            return CFG["pomo_focus_min"] * 60
+        # long break after every set of tomatoes
+        return (CFG["pomo_long_break_min"] if self.round > CFG["pomo_set_size"]
+                else CFG["pomo_break_min"]) * 60
+
+    def _sound(self, kind):
+        if not CFG["pomo_sound"]:
+            return
+        f = "/System/Library/Sounds/Glass.aiff" if kind == "break" \
+            else "/System/Library/Sounds/Ping.aiff"
+        try:
+            subprocess.Popen(["afplay", f],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        try:
+            msg = "番茄完成，休息一下" if kind == "break" else "休息结束，准备开始下一个番茄"
+            subprocess.Popen(["osascript", "-e",
+                              f'display notification "{msg}" with title "番茄钟"'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def press(self):
+        self._rollover()
+        if self.mode == "idle":
+            self.mode = "focus"
+            self.remaining = self._length()
+            self.ends_at = time.time() + self.remaining
+            self.paused = False
+        elif self.paused:
+            self.paused = False
+            self.ends_at = time.time() + self.remaining
+        elif self.mode in ("focus", "break"):
+            self.paused = True
+            self.remaining = max(0, int(self.ends_at - time.time()))
+        PUSH_NOW.set()
+
+    def reset(self):
+        self.mode = "idle"
+        self.paused = False
+        self.remaining = CFG["pomo_focus_min"] * 60
+        self.ends_at = None
+        PUSH_NOW.set()
+
+    def tick(self):
+        self._rollover()
+        if self.mode in ("focus", "break") and not self.paused:
+            now = time.time()
+            if self.ends_at and now >= self.ends_at:
+                if self.mode == "focus":
+                    self.today_n += 1
+                    self.total_n += 1
+                    self.today_min += CFG["pomo_focus_min"]
+                    self.round += 1
+                    self._sound("break")
+                    self.mode = "break"
+                    self.remaining = self._length()
+                    self.ends_at = now + self.remaining
+                else:
+                    self._sound("done")
+                    self.mode = "idle"
+                    self.round = 1
+                    self.remaining = CFG["pomo_focus_min"] * 60
+                    self.ends_at = None
+                self._save()
+                PUSH_NOW.set()
+
+    def snapshot(self):
+        return {
+            "mode": self.mode, "paused": self.paused,
+            "remaining": int(self.remaining if self.paused or not self.ends_at
+                             else max(0, self.ends_at - time.time())),
+            "round": self.round, "set": CFG["pomo_set_size"],
+            "focus_min": CFG["pomo_focus_min"],
+            "break_min": (CFG["pomo_long_break_min"] if self.round > CFG["pomo_set_size"]
+                          else CFG["pomo_break_min"]),
+            "today_n": self.today_n, "total_n": self.total_n,
+            "today_min": self.today_min,
+        }
+
+
+POMO = Pomodoro()
 
 
 def fetch_dsh_balance():
@@ -1112,6 +1258,7 @@ def refresher():
     prev_notifs = 0
     last_flush = 0.0
     while True:
+        POMO.tick()
         if time.time() - last_flush > 30:
             flush_codex_state()
             last_flush = time.time()
@@ -1125,7 +1272,10 @@ def refresher():
             prev_notifs = n
         except Exception as e:
             print(f"[agentboard] refresh error: {e}", flush=True)
-        time.sleep(CFG["scan_interval_sec"])
+        if POMO.mode in ("focus", "break") and not POMO.paused:
+            time.sleep(1)              # keep the countdown fresh on screen
+        else:
+            time.sleep(CFG["scan_interval_sec"])
 
 
 # ------------------------------------------------------------- USB push
@@ -1135,7 +1285,8 @@ SERIAL_GLOBS = ["/dev/cu.usbmodem*"]
 
 def wire_payload(snap):
     """Trimmed snapshot for the display (it only uses these keys)."""
-    w = {k: snap[k] for k in ("generated_at", "clock", "date", "date_cn", "weather", "host",
+    w = {k: snap[k] for k in ("generated_at", "clock", "date", "date_cn", "weather",
+                              "pomo", "host",
                               "shown", "quota", "procs", "models", "notifs") if k in snap}
     return json.dumps(w, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
 
@@ -1204,6 +1355,13 @@ def serial_pusher():
                                 NOTIFS.mark_seen()
                                 print("[agentboard] display SEEN, marked notifs read",
                                       flush=True)
+                            elif tag in (b"POMO", b"pomo"):
+                                POMO.press()
+                                print(f"[agentboard] pomo press -> {POMO.mode}"
+                                      f"{'(paused)' if POMO.paused else ''}", flush=True)
+                            elif tag in (b"POMO_RST", b"pomo_rst"):
+                                POMO.reset()
+                                print("[agentboard] pomo reset", flush=True)
                             else:
                                 continue
                             with STATE_LOCK:
@@ -1233,7 +1391,10 @@ def serial_pusher():
             except OSError:
                 pass
             fd = None
-        PUSH_NOW.wait(timeout=2)
+        if POMO.mode in ("focus", "break") and not POMO.paused:
+            PUSH_NOW.wait(timeout=1)
+        else:
+            PUSH_NOW.wait(timeout=2)
         PUSH_NOW.clear()
 
 
