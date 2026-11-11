@@ -355,26 +355,25 @@ void drawFooter(int activePage) {
 // quota block shared by the home page (drawn at a fixed y at the bottom)
 void drawQuota(int yTop) {
   char buf[72];
+  char cb[16];
   int y = yTop;
   u8g2.drawHLine(0, y - 6, W);
   if (data.hasCodex) {
     drawAgentIcon(2, y, "chatgpt");
     u8g2.setFont(F_ASCII);
     u8g2.drawStr(18, y + 10, "ChatGPT");
-    drawBar(68, y + 2, 56, 9, data.gptResetIn > 0 ? data.gpt5h : 0);
+    drawBar(64, y + 2, 56, 9, data.gptResetIn > 0 ? data.gpt5h : 0);
     if (data.gptResetIn > 0) {
       if (data.gptLimited) {
-        // empty-limits events: the window hit its cap
-        drawBar(68, y + 2, 56, 9, 100.0f);
+        drawBar(64, y + 2, 56, 9, 100.0f);
         snprintf(buf, sizeof(buf), "100%%");
-        u8g2.drawStr(128, y + 10, buf);
+        u8g2.drawStr(124, y + 10, buf);
       } else {
-        drawBar(68, y + 2, 56, 9, data.gpt5h);
         snprintf(buf, sizeof(buf), "%.0f%%", data.gpt5h);
-        u8g2.drawStr(128, y + 10, buf);
+        u8g2.drawStr(124, y + 10, buf);
       }
       u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(156, y + 10, "重置");
+      u8g2.drawUTF8(152, y + 10, "重置");
       u8g2.setFont(F_ASCII);
       if (data.gptResetIn >= 3600) {
         snprintf(buf, sizeof(buf), "%ldh%02dm",
@@ -382,26 +381,26 @@ void drawQuota(int yTop) {
       } else {
         snprintf(buf, sizeof(buf), "%ldm", (long)(data.gptResetIn / 60));
       }
-      u8g2.drawStr(180, y + 10, buf);
+      u8g2.drawStr(176, y + 10, buf);
+      char age[12];
+      if (data.gptSnapAge < 120)       snprintf(age, sizeof(age), "now");
+      else if (data.gptSnapAge < 3600) snprintf(age, sizeof(age), "%ldm", (long)(data.gptSnapAge / 60));
+      else                             snprintf(age, sizeof(age), "%ldh", (long)(data.gptSnapAge / 3600));
+      u8g2.drawStr(234, y + 10, age);
     } else {
-      // window already reset: the percent above is from the old window
       u8g2.setFont(F_CJK);
-      u8g2.drawUTF8(128, y + 10, "已重置·待刷新");
+      u8g2.drawUTF8(124, y + 10, "已重置·待刷新");
     }
-    // snapshot age so stale numbers are obvious
-    u8g2.setFont(F_ASCII);
-    char age[12];
-    if (data.gptSnapAge < 120)       snprintf(age, sizeof(age), "now");
-    else if (data.gptSnapAge < 3600) snprintf(age, sizeof(age), "%ldm", (long)(data.gptSnapAge / 60));
-    else                             snprintf(age, sizeof(age), "%ldh", (long)(data.gptSnapAge / 3600));
-    snprintf(buf, sizeof(buf), "%s", age);
-    u8g2.drawStr(232, y + 10, buf);
     u8g2.setFont(F_CJK);
-    u8g2.drawUTF8(262, y + 10, "每周");
+    u8g2.drawUTF8(280, y + 10, "缓");
     u8g2.setFont(F_ASCII);
-    drawBar(288, y + 2, 56, 9, data.gptWeek);
+    fmtTokens(data.gptCache, cb, sizeof(cb));
+    u8g2.drawStr(292, y + 10, cb);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(336, y + 10, "每周");
+    u8g2.setFont(F_ASCII);
     snprintf(buf, sizeof(buf), "%.0f%%", data.gptWeek);
-    u8g2.drawStr(350, y + 10, buf);
+    u8g2.drawStr(364, y + 10, buf);
     y += 18;
   }
   if (data.hasClaude) {
@@ -415,8 +414,13 @@ void drawQuota(int yTop) {
     fmtTokens(data.claudeTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
     u8g2.drawStr(90, y + 10, buf);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(152, y + 10, "缓");
+    u8g2.setFont(F_ASCII);
+    fmtTokens(data.claudeCache, cb, sizeof(cb));
+    u8g2.drawStr(164, y + 10, cb);
     snprintf(buf, sizeof(buf), "%d sess", data.claudeSessions);
-    u8g2.drawStr(152, y + 10, buf);
+    u8g2.drawStr(216, y + 10, buf);
     y += 16;
   }
   if (data.hasPi) {
@@ -430,8 +434,13 @@ void drawQuota(int yTop) {
     fmtTokens(data.piTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
     u8g2.drawStr(72, y + 10, buf);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(134, y + 10, "缓");
+    u8g2.setFont(F_ASCII);
+    fmtTokens(data.piCache, cb, sizeof(cb));
+    u8g2.drawStr(146, y + 10, cb);
     snprintf(buf, sizeof(buf), "%d sess", data.piSessions);
-    u8g2.drawStr(142, y + 10, buf);
+    u8g2.drawStr(198, y + 10, buf);
     y += 16;
   }
   if (data.hasDsh) {
@@ -442,35 +451,19 @@ void drawQuota(int yTop) {
     u8g2.drawStr(44, y + 10, buf);
     u8g2.setFont(F_CJK);
     u8g2.drawUTF8(76, y + 10, "元");
-    u8g2.drawUTF8(96, y + 10, "今日");
+    u8g2.drawUTF8(98, y + 10, "今日");
     u8g2.setFont(F_ASCII);
     char tok[16];
     fmtTokens(data.dshTok, tok, sizeof(tok));
     snprintf(buf, sizeof(buf), "%s tok", tok);
-    u8g2.drawStr(130, y + 10, buf);
-    snprintf(buf, sizeof(buf), "%d sess", data.dshSessions);
-    u8g2.drawStr(200, y + 10, buf);
-  }
-
-  // cache usage row: where the tokens really went
-  y += 16;
-  u8g2.setFont(F_CJK);
-  u8g2.drawUTF8(4, y + 10, "缓存");
-  u8g2.setFont(F_ASCII);
-  int cx = 34;
-  const struct { const char* a; float v; } cacheRows[4] = {
-    {"claude", data.claudeCache}, {"chatgpt", data.gptCache},
-    {"pi", data.piCache}, {"dsh", data.dshCache},
-  };
-  for (int i = 0; i < 4; i++) {
-    if (cacheRows[i].v < 1000) continue;          // skip near-zero entries
-    char cbuf[16];
-    fmtTokens(cacheRows[i].v, cbuf, sizeof(cbuf));
-    drawAgentIcon(cx, y, cacheRows[i].a);
+    u8g2.drawStr(132, y + 10, buf);
+    u8g2.setFont(F_CJK);
+    u8g2.drawUTF8(194, y + 10, "缓");
     u8g2.setFont(F_ASCII);
-    u8g2.drawStr(cx + 16, y + 10, cbuf);
-    cx += 16 + u8g2.getStrWidth(cbuf) + 12;
-    if (cx > W - 30) break;
+    fmtTokens(data.dshCache, cb, sizeof(cb));
+    u8g2.drawStr(206, y + 10, cb);
+    snprintf(buf, sizeof(buf), "%d sess", data.dshSessions);
+    u8g2.drawStr(258, y + 10, buf);
   }
 }
 
@@ -480,9 +473,8 @@ void renderNotifs() {
   char buf[72];
   drawHeader();
 
-  // quota block pinned above the footer: codex 18 + claude 16 + pi 16 + dsh 16
-  // + cache 16 + gaps
-  int quotaTop = H - 22 - 18 - 16 - 16 - 16 - 16 - 8;      // ~ 188
+  // quota block pinned above the footer: codex 18 + claude/pi/dsh 16 each + gaps
+  int quotaTop = H - 22 - 18 - 16 - 16 - 16 - 8;      // ~ 204
   int notifBottom = quotaTop - 8;
 
   if (data.nn == 0) {
