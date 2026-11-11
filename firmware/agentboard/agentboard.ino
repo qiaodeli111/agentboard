@@ -739,60 +739,66 @@ void buildHash(char* out, size_t n) {
 // facing the screen (confirmed on device): LEFT = KEY (GPIO18) = page /
 // long-press acks notifs; RIGHT = BOOT (GPIO0) = pomodoro start/pause
 void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allowStart) {
-  if (pressed) {
-    if (b.pressStart == 0) {
-      // confirm the press: single render-burst EMI glitches don't last 80ms
-      if (!allowStart) { b.confirmStart = 0; return; }
-      if (b.confirmStart == 0) { b.confirmStart = now; return; }
-      if (now - b.confirmStart < 80) return;
-      b.pressStart = b.confirmStart;
-      b.longFired = false;
-    }
-    if (b.pressStart && !b.longFired && now - b.pressStart > 800) {
-    b.longFired = true;
-    if (isLeft) {
-      Serial.print("ACK\n");        // long-press left: clear notifications
-      if (lastDataMs) {
-        u8g2.clearBuffer();
-        u8g2.drawBox(0, 0, W, H);
-        u8g2.setDrawColor(0);
-        u8g2.setFont(F_CJK);
-        u8g2.drawUTF8(60, H / 2 + 6, "已发送清除，通知将消失…");
-        u8g2.setDrawColor(1);
-        u8g2.sendBuffer();
-      }
-    } else {
-      Serial.print("POMO_RST\n");   // long-press right: reset the tomato
-    }
-  } else if (!pressed) {
-    if (b.pressStart == 0) { b.confirmStart = 0; return; }   // bounce aborted
-    if (!b.longFired && now - b.pressStart > 30 && now - b.pressStart < 800) {
-      if (isLeft) {
-        if (page == 0) Serial.print("SEEN\n");
-        page = (page + 1) % 4;
-      } else {
-        if (now - lastRightFire < 1200) { b.pressStart = 0; return; }
-        lastRightFire = now;
-        Serial.print("POMO\n");     // short-press right: start / pause / resume
-        // optimistic local toggle: react instantly, server truth resyncs
-        if (!strcmp(data.pomoMode, "idle")) {
-          strlcpy(data.pomoMode, "focus", sizeof(data.pomoMode));
-          data.pomoPaused = false;
-          pomoShowRem = data.pomoFocusMin * 60;
-          pomoRunning = true;
-        } else if (!data.pomoPaused) {
-          data.pomoPaused = true;
-          pomoRunning = false;
+  if (!pressed) {
+    // released: fire the short-press if confirmed and inside the window
+    if (b.pressStart != 0) {
+      if (!b.longFired && now - b.pressStart > 30 && now - b.pressStart < 800) {
+        if (isLeft) {
+          if (page == 0) Serial.print("SEEN\n");
+          page = (page + 1) % 4;
         } else {
-          data.pomoPaused = false;
-          pomoRunning = true;
+          if (now - lastRightFire < 1200) { b.pressStart = 0; b.confirmStart = 0; return; }
+          lastRightFire = now;
+          Serial.print("POMO\n");   // right short: start / pause / resume
+          // optimistic local toggle: react instantly, server truth resyncs
+          if (!strcmp(data.pomoMode, "idle")) {
+            strlcpy(data.pomoMode, "focus", sizeof(data.pomoMode));
+            data.pomoPaused = false;
+            pomoShowRem = data.pomoFocusMin * 60;
+            pomoRunning = true;
+          } else if (!data.pomoPaused) {
+            data.pomoPaused = true;
+            pomoRunning = false;
+          } else {
+            data.pomoPaused = false;
+            pomoRunning = true;
+          }
         }
+        if (lastDataMs) render();
       }
-      if (lastDataMs) render();
+      b.pressStart = 0;
+      b.confirmStart = 0;
     }
-    b.pressStart = 0;
-    b.confirmStart = 0;
+    return;
   }
+  if (b.pressStart != 0) {
+    // confirmed press currently held: only the long-press fires here
+    if (!b.longFired && now - b.pressStart > 800) {
+      b.longFired = true;
+      if (isLeft) {
+        Serial.print("ACK\n");      // left long: clear notifications
+        if (lastDataMs) {
+          u8g2.clearBuffer();
+          u8g2.drawBox(0, 0, W, H);
+          u8g2.setDrawColor(0);
+          u8g2.setFont(F_CJK);
+          u8g2.drawUTF8(60, H / 2 + 6, "已发送清除，通知将消失…");
+          u8g2.setDrawColor(1);
+          u8g2.sendBuffer();
+        }
+      } else {
+        Serial.print("POMO_RST\n"); // right long: reset the tomato
+      }
+    }
+    return;
+  }
+  // new press: require LOW to persist ~80ms so render-burst EMI glitches
+  // on GPIO0 are dropped
+  if (!allowStart) { b.confirmStart = 0; return; }
+  if (b.confirmStart == 0) { b.confirmStart = now; return; }
+  if (now - b.confirmStart < 80) return;
+  b.pressStart = b.confirmStart;
+  b.longFired = false;
 }
 
 void handleButton() {
