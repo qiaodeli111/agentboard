@@ -39,7 +39,9 @@ struct BtnState {
   bool longFired;
 };
 BtnState btnLeft, btnRight;
-void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now);
+uint32_t lastRxMs = 0;          // last serial RX activity (EMI source)
+uint32_t lastRightFire = 0;     // min gap between pomodoro button fires
+void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allowStart);
 
 #define F_HEAD  u8g2_font_9x15B_tr
 #define F_ASCII u8g2_font_6x10_tr
@@ -735,8 +737,9 @@ void buildHash(char* out, size_t n) {
 // ---------------- buttons ----------------
 // facing the screen (confirmed on device): LEFT = KEY (GPIO18) = page /
 // long-press acks notifs; RIGHT = BOOT (GPIO0) = pomodoro start/pause
-void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
+void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allowStart) {
   if (pressed && b.pressStart == 0) {
+    if (!allowStart) return;      // ignore new presses right after serial RX
     b.pressStart = now;
     b.longFired = false;
   } else if (pressed && b.pressStart && !b.longFired && now - b.pressStart > 800) {
@@ -761,6 +764,8 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
         if (page == 0) Serial.print("SEEN\n");
         page = (page + 1) % 4;
       } else {
+        if (now - lastRightFire < 1200) { b.pressStart = 0; return; }
+        lastRightFire = now;
         Serial.print("POMO\n");     // short-press right: start / pause / resume
         // optimistic local toggle: react instantly, server truth resyncs
         if (!strcmp(data.pomoMode, "idle")) {
@@ -784,8 +789,9 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
 
 void handleButton() {
   uint32_t now = millis();
-  stepButton(btnLeft, true, digitalRead(KEY_PIN) == LOW, now);
-  stepButton(btnRight, false, digitalRead(BOOT_PIN) == LOW, now);
+  bool rxQuiet = (now - lastRxMs > 400);
+  stepButton(btnLeft, true, digitalRead(KEY_PIN) == LOW, now, rxQuiet);
+  stepButton(btnRight, false, digitalRead(BOOT_PIN) == LOW, now, rxQuiet);
 }
 
 // ---------------- setup / loop ----------------
@@ -856,6 +862,7 @@ void loop() {
   delay(20);
 #else
   // ---- USB serial push: drain continuously, act on complete lines ----
+  if (Serial.available()) lastRxMs = millis();   // frame inbound: EMI window
   static String line;
   bool gotLine = false;
   while (Serial.available()) {

@@ -1374,12 +1374,12 @@ def serial_pusher():
                                       flush=True)
                             elif tag in (b"POMO", b"pomo"):
                                 POMO.press()
-                                print(f"[agentboard] pomo press -> {POMO.mode}"
+                                print(f"[{time.strftime('%H:%M:%S')}] pomo press -> {POMO.mode}"
                                       f"{'(paused)' if POMO.paused else ''}", flush=True)
                                 REFRESH_NOW.set()
                             elif tag in (b"POMO_RST", b"pomo_rst"):
                                 POMO.reset()
-                                print("[agentboard] pomo reset", flush=True)
+                                print(f"[{time.strftime('%H:%M:%S')}] pomo reset", flush=True)
                                 REFRESH_NOW.set()
                             else:
                                 continue
