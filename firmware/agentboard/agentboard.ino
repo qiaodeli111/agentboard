@@ -104,6 +104,9 @@ String lastHash;
 #endif
 
 int page = 0;                       // 0 notifs, 1 sessions, 2 models, 3 pomodoro
+int pomoShowRem = 0;                // local per-second countdown copy
+bool pomoRunning = false;           // focus/break and not paused
+uint32_t lastSecTick = 0;
 
 // ---------------- helpers ----------------
 const char* agentShort(const char* a) {
@@ -307,6 +310,8 @@ bool extractData(const String& payload) {
   nd.nm = i;
 
   data = nd;
+  pomoShowRem = nd.pomoRemaining;          // resync with server truth
+  pomoRunning = (strcmp(nd.pomoMode, "idle") != 0) && !nd.pomoPaused;
   lastDataMs = millis();
   return true;
 }
@@ -668,8 +673,8 @@ void renderPomo() {
   snprintf(buf, sizeof(buf), "set %d/4", data.pomoRound);
   u8g2.drawStr(150, 42, buf);
 
-  // big countdown
-  int rem = data.pomoRemaining;
+  // big countdown (ticks locally between pushes)
+  int rem = pomoShowRem;
   snprintf(buf, sizeof(buf), "%02d:%02d", rem / 60, rem % 60);
   u8g2.setFont(F_BIG);
   u8g2.drawStr(10, 130, buf);
@@ -727,8 +732,8 @@ void buildHash(char* out, size_t n) {
 }
 
 // ---------------- buttons ----------------
-// facing the screen: LEFT = BOOT (GPIO0) = page / long-press acks notifs
-//                    RIGHT = KEY (GPIO18) = pomodoro start/pause / long reset
+// facing the screen (confirmed on device): LEFT = KEY (GPIO18) = page /
+// long-press acks notifs; RIGHT = BOOT (GPIO0) = pomodoro start/pause
 void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
   if (pressed && b.pressStart == 0) {
     b.pressStart = now;
@@ -765,8 +770,8 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
 
 void handleButton() {
   uint32_t now = millis();
-  stepButton(btnLeft, true, digitalRead(BOOT_PIN) == LOW, now);
-  stepButton(btnRight, false, digitalRead(KEY_PIN) == LOW, now);
+  stepButton(btnLeft, true, digitalRead(KEY_PIN) == LOW, now);
+  stepButton(btnRight, false, digitalRead(BOOT_PIN) == LOW, now);
 }
 
 // ---------------- setup / loop ----------------
@@ -855,6 +860,12 @@ void loop() {
     }
   }
   handleButton();
+  // pomo countdown ticks locally once a second, independent of push cadence
+  if (pomoRunning && pomoShowRem > 0 && millis() - lastSecTick >= 1000) {
+    lastSecTick = millis();
+    pomoShowRem--;
+    if (page == 3 && lastDataMs) render();
+  }
   static uint32_t lastTick = 0;
   if (lastDataMs && millis() - lastTick > 60000) {
     lastTick = millis();

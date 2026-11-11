@@ -1272,10 +1272,7 @@ def refresher():
             prev_notifs = n
         except Exception as e:
             print(f"[agentboard] refresh error: {e}", flush=True)
-        if POMO.mode in ("focus", "break") and not POMO.paused:
-            time.sleep(1)              # keep the countdown fresh on screen
-        else:
-            time.sleep(CFG["scan_interval_sec"])
+        time.sleep(CFG["scan_interval_sec"])
 
 
 # ------------------------------------------------------------- USB push
@@ -1391,10 +1388,7 @@ def serial_pusher():
             except OSError:
                 pass
             fd = None
-        if POMO.mode in ("focus", "break") and not POMO.paused:
-            PUSH_NOW.wait(timeout=1)
-        else:
-            PUSH_NOW.wait(timeout=2)
+        PUSH_NOW.wait(timeout=2)
         PUSH_NOW.clear()
 
 
