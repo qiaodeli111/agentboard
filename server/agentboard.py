@@ -55,6 +55,7 @@ DEFAULTS = {
     "weather_lat": 22.5431,          # Shenzhen
     "weather_lon": 114.0579,
     "weather_interval_sec": 3600,
+    "codex_state_file": str(HOME / "agentboard" / "server" / "codex_state.json"),
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -199,6 +200,8 @@ class Collector:
     quota_limited = False   # empty-limits events seen => 5h window capped
     dsh_balance = {}   # {"balance": float, "bonus": float, "currency": "CNY", "ts": ...}
     weather = {}       # {"text": "24℃ 多云", "ts": ...}
+    codex_state = {}   # session id -> [last_total, last_cached] persisted across restarts
+    codex_state_dirty = False
 
     def __init__(self):
         self.files = {}            # path -> FileState
@@ -434,18 +437,27 @@ class Collector:
                     total = tot.get("input_tokens", 0) + tot.get("output_tokens", 0) \
                         + tot.get("cached_input_tokens", 0)
                     m["tokens"] = total
+                    sid = m.get("id") or ""
+                    saved = Collector.codex_state.get(sid)
                     if "last_total" not in m:
-                        # first sight: baseline. If the whole session began
-                        # today, its full usage counts as today's.
-                        m["last_total"] = total
-                        m["last_cached"] = tot.get("cached_input_tokens", 0)
-                        if (m.get("started") or 0) >= self.today and total:
-                            m["tok_today"] = m.get("tok_today", 0) + total
-                            mdl = m.get("model") or "?"
-                            md = m.setdefault("models", {})
-                            md[mdl] = md.get(mdl, 0) + total
-                            m["cache_today"] = m.get("cache_today", 0) \
-                                + tot.get("cached_input_tokens", 0)
+                        # first sight: restore the persisted baseline if it is
+                        # valid (daemon restarts must not lose today's deltas),
+                        # else baseline at the current total.
+                        if saved and 0 < saved[0] <= total:
+                            m["last_total"] = saved[0]
+                            m["last_cached"] = saved[1]
+                        else:
+                            m["last_total"] = total
+                            m["last_cached"] = tot.get("cached_input_tokens", 0)
+                            if (m.get("started") or 0) >= self.today and total:
+                                m["tok_today"] = m.get("tok_today", 0) + total
+                                mdl = m.get("model") or "?"
+                                md = m.setdefault("models", {})
+                                md[mdl] = md.get(mdl, 0) + total
+                                m["cache_today"] = m.get("cache_today", 0) \
+                                    + tot.get("cached_input_tokens", 0)
+                        Collector.codex_state[sid] = [m["last_total"], m["last_cached"]]
+                        Collector.codex_state_dirty = True
                     elif total > m["last_total"]:
                         delta = total - m["last_total"]
                         m["last_total"] = total
@@ -459,6 +471,8 @@ class Collector:
                                 m["cache_today"] = m.get("cache_today", 0) \
                                     + cached_total - m.get("last_cached", 0)
                             m["last_cached"] = max(cached_total, m.get("last_cached", 0))
+                        Collector.codex_state[sid] = [m["last_total"], m.get("last_cached", 0)]
+                        Collector.codex_state_dirty = True
                 rl = p.get("rate_limits")
                 if rl and ts:
                     if (rl.get("primary") or {}).get("used_percent") is not None:
@@ -1072,11 +1086,35 @@ def weather_loop():
         time.sleep(CFG["weather_interval_sec"])
 
 
+def load_codex_state():
+    try:
+        raw = json.load(open(CFG["codex_state_file"]))
+        if isinstance(raw, dict):
+            Collector.codex_state = raw
+    except Exception:
+        pass
+
+
+def flush_codex_state():
+    if not Collector.codex_state_dirty:
+        return
+    try:
+        json.dump(Collector.codex_state, open(CFG["codex_state_file"], "w"))
+        Collector.codex_state_dirty = False
+    except Exception:
+        pass
+
+
 def refresher():
     col = Collector()
+    load_codex_state()
     global SNAPSHOT
     prev_notifs = 0
+    last_flush = 0.0
     while True:
+        if time.time() - last_flush > 30:
+            flush_codex_state()
+            last_flush = time.time()
         try:
             snap = build_snapshot(col)
             with STATE_LOCK:
