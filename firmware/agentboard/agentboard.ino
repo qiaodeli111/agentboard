@@ -36,6 +36,7 @@ U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(U8G2_R1, /*cs=*/40, /*dc=*/5, /*reset=*/41)
 // .ino auto-prototypes land above custom types, so declare them explicitly
 struct BtnState {
   uint32_t pressStart;
+  uint32_t confirmStart;   // EMI filter: LOW must persist this long to count
   bool longFired;
 };
 BtnState btnLeft, btnRight;
@@ -738,11 +739,16 @@ void buildHash(char* out, size_t n) {
 // facing the screen (confirmed on device): LEFT = KEY (GPIO18) = page /
 // long-press acks notifs; RIGHT = BOOT (GPIO0) = pomodoro start/pause
 void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allowStart) {
-  if (pressed && b.pressStart == 0) {
-    if (!allowStart) return;      // ignore new presses right after serial RX
-    b.pressStart = now;
-    b.longFired = false;
-  } else if (pressed && b.pressStart && !b.longFired && now - b.pressStart > 800) {
+  if (pressed) {
+    if (b.pressStart == 0) {
+      // confirm the press: single render-burst EMI glitches don't last 80ms
+      if (!allowStart) { b.confirmStart = 0; return; }
+      if (b.confirmStart == 0) { b.confirmStart = now; return; }
+      if (now - b.confirmStart < 80) return;
+      b.pressStart = b.confirmStart;
+      b.longFired = false;
+    }
+    if (b.pressStart && !b.longFired && now - b.pressStart > 800) {
     b.longFired = true;
     if (isLeft) {
       Serial.print("ACK\n");        // long-press left: clear notifications
@@ -758,7 +764,8 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allow
     } else {
       Serial.print("POMO_RST\n");   // long-press right: reset the tomato
     }
-  } else if (!pressed && b.pressStart) {
+  } else if (!pressed) {
+    if (b.pressStart == 0) { b.confirmStart = 0; return; }   // bounce aborted
     if (!b.longFired && now - b.pressStart > 30 && now - b.pressStart < 800) {
       if (isLeft) {
         if (page == 0) Serial.print("SEEN\n");
@@ -784,6 +791,7 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allow
       if (lastDataMs) render();
     }
     b.pressStart = 0;
+    b.confirmStart = 0;
   }
 }
 
