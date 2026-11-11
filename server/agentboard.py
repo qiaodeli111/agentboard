@@ -791,6 +791,7 @@ class NotifStore:
 
 NOTIFS = NotifStore()
 PUSH_NOW = threading.Event()      # set to push a frame to the display immediately
+REFRESH_NOW = threading.Event()   # set to rebuild the snapshot immediately
 
 
 # ------------------------------------------------------------- processes
@@ -1120,6 +1121,7 @@ class Pomodoro:
         self.remaining = CFG["pomo_focus_min"] * 60
         self.ends_at = None
         PUSH_NOW.set()
+        REFRESH_NOW.set()
 
     def tick(self):
         self._rollover()
@@ -1143,6 +1145,7 @@ class Pomodoro:
                     self.ends_at = None
                 self._save()
                 PUSH_NOW.set()
+                REFRESH_NOW.set()
 
     def snapshot(self):
         return {
@@ -1261,6 +1264,12 @@ def flush_codex_state():
         pass
 
 
+def pomo_ticker():
+    while True:
+        POMO.tick()
+        time.sleep(1)
+
+
 def refresher():
     col = Collector()
     load_codex_state()
@@ -1268,7 +1277,6 @@ def refresher():
     prev_notifs = 0
     last_flush = 0.0
     while True:
-        POMO.tick()
         if time.time() - last_flush > 30:
             flush_codex_state()
             last_flush = time.time()
@@ -1282,7 +1290,9 @@ def refresher():
             prev_notifs = n
         except Exception as e:
             print(f"[agentboard] refresh error: {e}", flush=True)
-        time.sleep(CFG["scan_interval_sec"])
+        flush_codex_state()
+        REFRESH_NOW.wait(timeout=CFG["scan_interval_sec"])
+        REFRESH_NOW.clear()
 
 
 # ------------------------------------------------------------- USB push
@@ -1366,9 +1376,11 @@ def serial_pusher():
                                 POMO.press()
                                 print(f"[agentboard] pomo press -> {POMO.mode}"
                                       f"{'(paused)' if POMO.paused else ''}", flush=True)
+                                REFRESH_NOW.set()
                             elif tag in (b"POMO_RST", b"pomo_rst"):
                                 POMO.reset()
                                 print("[agentboard] pomo reset", flush=True)
+                                REFRESH_NOW.set()
                             else:
                                 continue
                             with STATE_LOCK:
@@ -1500,6 +1512,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     threading.Thread(target=refresher, daemon=True).start()
     threading.Thread(target=dsh_balance_loop, daemon=True).start()
+    threading.Thread(target=pomo_ticker, daemon=True).start()
     threading.Thread(target=weather_loop, daemon=True).start()
     threading.Thread(target=serial_pusher, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), Handler)

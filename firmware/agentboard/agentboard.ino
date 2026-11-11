@@ -90,7 +90,7 @@ struct BoardData {
   float claudeCache, gptCache, piCache, dshCache;
   // pomodoro
   char pomoMode[8]; int pomoRemaining; bool pomoPaused;
-  int pomoRound, pomoSet, pomoTodayN, pomoTotalN, pomoTodayMin, pomoBreakMin;
+  int pomoRound, pomoSet, pomoTodayN, pomoTotalN, pomoTodayMin, pomoBreakMin, pomoFocusMin;
   int procClaude, procCodex, procPi, procDsh; bool chatgptApp, dshApp;
 };
 BoardData data;
@@ -273,6 +273,7 @@ bool extractData(const String& payload) {
   nd.pomoTotalN = pm["total_n"] | 0;
   nd.pomoTodayMin = pm["today_min"] | 0;
   nd.pomoBreakMin = pm["break_min"] | 5;
+  nd.pomoFocusMin = pm["focus_min"] | 25;
 
   int i = 0;
   for (JsonObject item : doc["shown"].as<JsonArray>()) {
@@ -761,6 +762,19 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
         page = (page + 1) % 4;
       } else {
         Serial.print("POMO\n");     // short-press right: start / pause / resume
+        // optimistic local toggle: react instantly, server truth resyncs
+        if (!strcmp(data.pomoMode, "idle")) {
+          strlcpy(data.pomoMode, "focus", sizeof(data.pomoMode));
+          data.pomoPaused = false;
+          pomoShowRem = data.pomoFocusMin * 60;
+          pomoRunning = true;
+        } else if (!data.pomoPaused) {
+          data.pomoPaused = true;
+          pomoRunning = false;
+        } else {
+          data.pomoPaused = false;
+          pomoRunning = true;
+        }
       }
       if (lastDataMs) render();
     }
