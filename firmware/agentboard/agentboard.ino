@@ -33,6 +33,14 @@ U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(U8G2_R1, /*cs=*/40, /*dc=*/5, /*reset=*/41)
 #define KEY_PIN 18                  // board KEY button (pullup, pressed = LOW)
 #define BOOT_PIN 0                  // BOOT button works too (pullup, pressed = LOW)
 
+// .ino auto-prototypes land above custom types, so declare them explicitly
+struct BtnState {
+  uint32_t pressStart;
+  bool longFired;
+};
+BtnState btnLeft, btnRight;
+void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now);
+
 #define F_HEAD  u8g2_font_9x15B_tr
 #define F_ASCII u8g2_font_6x10_tr
 #define F_CJK   u8g2_font_wqy12_t_gb2312
@@ -721,12 +729,6 @@ void buildHash(char* out, size_t n) {
 // ---------------- buttons ----------------
 // facing the screen: LEFT = BOOT (GPIO0) = page / long-press acks notifs
 //                    RIGHT = KEY (GPIO18) = pomodoro start/pause / long reset
-struct BtnState {
-  uint32_t pressStart;
-  bool longFired;
-};
-BtnState btnLeft, btnRight;
-
 void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now) {
   if (pressed && b.pressStart == 0) {
     b.pressStart = now;

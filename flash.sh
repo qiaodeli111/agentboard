@@ -6,7 +6,13 @@ FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc"
 PORT="${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
 
 echo "== compile =="
-arduino-cli compile -b "$FQBN" . 2>&1 | grep -E 'error|Error|Sketch uses|Global variables' || true
+COMPILE_LOG=$(mktemp)
+if ! arduino-cli compile -b "$FQBN" . > "$COMPILE_LOG" 2>&1; then
+  grep -E 'error:' "$COMPILE_LOG" | head -10
+  echo "!! 编译失败，已中止（不会烧录旧固件）"
+  exit 1
+fi
+grep -E 'Sketch uses|Global variables' "$COMPILE_LOG"
 
 if [ -z "$PORT" ]; then echo "!! 没找到 /dev/cu.usbmodem*，板子没连上"; exit 1; fi
 echo "== upload to $PORT =="
