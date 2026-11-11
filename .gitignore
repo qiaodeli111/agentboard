@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 notifs.json
 codex_state.json
+pomo.json
