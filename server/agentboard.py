@@ -62,6 +62,8 @@ DEFAULTS = {
     "pomo_long_break_min": 15,
     "pomo_set_size": 4,
     "pomo_sound": True,
+    "notif_sound": True,
+    "sound_volume": 0.5,
     "claude_dir": str(HOME / ".claude" / "projects"),
     "codex_dir": str(HOME / ".codex" / "sessions"),
     "codex_index": str(HOME / ".codex" / "session_index.jsonl"),
@@ -896,6 +898,8 @@ def build_snapshot(col: Collector):
             NOTIFS.add(m["agent"], m.get("project") or "?",
                        m.get("summary") or m.get("title") or "(no title)",
                        m.get("last") or time.time())
+            if CFG.get("notif_sound"):
+                play_sound("Pop", CFG.get("sound_volume"))
         if prev == "idle" and cur == "running":
             NOTIFS.drop_for(m["agent"], m.get("project") or "?")
         if "prev_state" not in m and cur == "idle" and time.time() - (m.get("last") or 0) <= 600:
@@ -1086,13 +1090,7 @@ class Pomodoro:
     def _sound(self, kind):
         if not CFG["pomo_sound"]:
             return
-        f = "/System/Library/Sounds/Glass.aiff" if kind == "break" \
-            else "/System/Library/Sounds/Ping.aiff"
-        try:
-            subprocess.Popen(["afplay", f],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        play_sound("Glass" if kind == "break" else "Ping", CFG["sound_volume"])
         try:
             msg = "番茄完成，休息一下" if kind == "break" else "休息结束，准备开始下一个番茄"
             subprocess.Popen(["osascript", "-e",
@@ -1161,6 +1159,18 @@ class Pomodoro:
 
 
 POMO = Pomodoro()
+
+
+def play_sound(name, volume=None):
+    """Non-blocking macOS system sound playback."""
+    cmd = ["afplay"]
+    if volume is not None:
+        cmd += ["-v", str(volume)]
+    cmd.append(f"/System/Library/Sounds/{name}.aiff")
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def fetch_dsh_balance():
