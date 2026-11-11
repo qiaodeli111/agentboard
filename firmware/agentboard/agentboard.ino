@@ -14,6 +14,7 @@
 #define USE_WIFI 0   // 0 = USB serial push (default), 1 = ESP polls over WiFi
 
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <SPI.h>
 #include <U8g2lib.h>
 #include "secrets.h"
@@ -91,9 +92,6 @@ struct BoardData {
   bool hasPi; float piTok; int piSessions;
   bool hasDsh; float dshBalance, dshBonus, dshTok; int dshSessions;
   float claudeCache, gptCache, piCache, dshCache;
-  // pomodoro
-  char pomoMode[8]; int pomoRemaining; bool pomoPaused;
-  int pomoRound, pomoSet, pomoTodayN, pomoTotalN, pomoTodayMin, pomoBreakMin, pomoFocusMin;
   int procClaude, procCodex, procPi, procDsh; bool chatgptApp, dshApp;
 };
 BoardData data;
@@ -107,9 +105,73 @@ String lastHash;
 #endif
 
 int page = 0;                       // 0 notifs, 1 sessions, 2 models, 3 pomodoro
-int pomoShowRem = 0;                // local per-second countdown copy
-bool pomoRunning = false;           // focus/break and not paused
+// ---- pomodoro: fully local. Serial only carries one-shot transition
+// events (POMO_BREAK / POMO_DONE) so the Mac can beep; phantom lines are
+// harmless because the daemon never touches timer state. ----
+enum { P_IDLE = 0, P_FOCUS = 1, P_BREAK = 2 };
+int      pMode = P_IDLE;
+uint32_t pEndMs = 0;        // millis deadline while running (wrap-safe compare)
+uint32_t pRemainMs = 0;     // frozen remaining while paused
+bool     pPaused = false;
+int      pRound = 1;
+int      pTodayN = 0, pTotalN = 0, pTodayMin = 0;
+char     pDate[12] = "";
+Preferences prefs;
+const uint32_t POMO_FOCUS_MS = 25UL * 60 * 1000;
+const uint32_t POMO_BREAK_MS = 5UL * 60 * 1000;
+const uint32_t POMO_LONG_MS  = 15UL * 60 * 1000;
+const int      POMO_SET = 4;
 uint32_t lastSecTick = 0;
+
+void pomoSave() {
+  prefs.putUInt("tn", (uint32_t)pTodayN);
+  prefs.putUInt("tt", (uint32_t)pTotalN);
+  prefs.putUInt("tm", (uint32_t)pTodayMin);
+  prefs.putString("pd", pDate);
+}
+
+uint32_t pomoRemainMs() {
+  if (pMode == P_IDLE) return POMO_FOCUS_MS;
+  if (pPaused) return pRemainMs;
+  return pEndMs - millis();               // wrap-safe via unsigned math
+}
+
+void pomoPress() {
+  if (pMode == P_IDLE) {
+    pMode = P_FOCUS;
+    pEndMs = millis() + POMO_FOCUS_MS;
+    pPaused = false;
+  } else if (!pPaused) {
+    pRemainMs = pEndMs - millis();        // pause: freeze remaining
+    pPaused = true;
+  } else {
+    pEndMs = millis() + pRemainMs;        // resume
+    pPaused = false;
+  }
+  if (page == 3 && lastDataMs) render();
+}
+
+void pomoReset() {
+  pMode = P_IDLE; pPaused = false; pRound = 1;
+  pEndMs = 0; pRemainMs = 0;
+  if (page == 3 && lastDataMs) render();
+}
+
+void pomoTick() {
+  if (pMode == P_IDLE || pPaused) return;
+  if ((int32_t)(millis() - pEndMs) < 0) return;
+  if (pMode == P_FOCUS) {
+    pTodayN++; pTotalN++; pTodayMin += 25; pRound++;
+    pomoSave();
+    Serial.print("POMO_BREAK\n");         // one-shot event: Mac beeps Glass
+    pMode = P_BREAK;
+    pEndMs = millis() + (pRound > POMO_SET ? POMO_LONG_MS : POMO_BREAK_MS);
+  } else {
+    Serial.print("POMO_DONE\n");          // one-shot event: Mac beeps Ping
+    pMode = P_IDLE; pRound = 1; pEndMs = 0;
+  }
+  if (page == 3 && lastDataMs) render();
+}
 
 // ---------------- helpers ----------------
 const char* agentShort(const char* a) {
@@ -266,17 +328,12 @@ bool extractData(const String& payload) {
     nd.dshSessions = ds["sessions_today"] | 0;
     nd.dshCache = (float)((double)(ds["today_cache"] | 0));
   }
-  JsonObject pm = doc["pomo"];
-  strlcpy(nd.pomoMode, pm["mode"] | "idle", sizeof(nd.pomoMode));
-  nd.pomoRemaining = pm["remaining"] | 0;
-  nd.pomoPaused = pm["paused"] | false;
-  nd.pomoRound = pm["round"] | 1;
-  nd.pomoSet = pm["set"] | 4;
-  nd.pomoTodayN = pm["today_n"] | 0;
-  nd.pomoTotalN = pm["total_n"] | 0;
-  nd.pomoTodayMin = pm["today_min"] | 0;
-  nd.pomoBreakMin = pm["break_min"] | 5;
-  nd.pomoFocusMin = pm["focus_min"] | 25;
+  const char* dd = doc["date"] | "";
+  if (dd[0] && pDate[0] && strcmp(dd, pDate) != 0) {
+    pTodayN = 0; pTodayMin = 0;    // new day: reset today counters
+    pomoSave();
+  }
+  if (dd[0]) strlcpy(pDate, dd, sizeof(pDate));
 
   int i = 0;
   for (JsonObject item : doc["shown"].as<JsonArray>()) {
@@ -314,8 +371,6 @@ bool extractData(const String& payload) {
   nd.nm = i;
 
   data = nd;
-  pomoShowRem = nd.pomoRemaining;          // resync with server truth
-  pomoRunning = (strcmp(nd.pomoMode, "idle") != 0) && !nd.pomoPaused;
   lastDataMs = millis();
   return true;
 }
@@ -658,9 +713,9 @@ void renderPomo() {
   drawHeader();
 
   // set progress dots (filled = tomatoes done in the current set)
-  int doneInSet = (data.pomoTodayN % data.pomoSet);
-  if (data.pomoRound > data.pomoSet) doneInSet = data.pomoSet;   // long-break phase
-  for (int i = 0; i < data.pomoSet; i++) {
+  int doneInSet = (pTodayN % POMO_SET);
+  if (pRound > POMO_SET) doneInSet = POMO_SET;   // long-break phase
+  for (int i = 0; i < POMO_SET; i++) {
     int dx = W - 30 - i * 22;
     if (i < doneInSet) u8g2.drawDisc(dx, 14, 5);
     else u8g2.drawCircle(dx, 14, 5);
@@ -669,16 +724,16 @@ void renderPomo() {
   // state line
   u8g2.setFont(F_CJK);
   const char* st;
-  if (!strcmp(data.pomoMode, "focus"))      st = data.pomoPaused ? "专注中（已暂停）" : "专注中";
-  else if (!strcmp(data.pomoMode, "break")) st = data.pomoBreakMin >= 15 ? "长休息" : "休息一下";
-  else                                      st = "待开始 · 按右键开始";
+  if (pMode == P_FOCUS)      st = pPaused ? "专注中（已暂停）" : "专注中";
+  else if (pMode == P_BREAK) st = (pRound > POMO_SET) ? "长休息" : "休息一下";
+  else                       st = "待开始 · 按右键开始";
   u8g2.drawUTF8(10, 42, st);
   u8g2.setFont(F_ASCII);
-  snprintf(buf, sizeof(buf), "set %d/4", data.pomoRound);
+  snprintf(buf, sizeof(buf), "set %d/4", pRound);
   u8g2.drawStr(150, 42, buf);
 
-  // big countdown (ticks locally between pushes)
-  int rem = pomoShowRem;
+  // big countdown (ticks locally every second)
+  int rem = pomoRemainMs() / 1000;
   snprintf(buf, sizeof(buf), "%02d:%02d", rem / 60, rem % 60);
   u8g2.setFont(F_BIG);
   u8g2.drawStr(10, 130, buf);
@@ -686,9 +741,9 @@ void renderPomo() {
   // stats
   u8g2.setFont(F_CJK);
   snprintf(buf, sizeof(buf), "今日 %d 个 · 累计 %d 个 · 专注 %d 分钟",
-           data.pomoTodayN, data.pomoTotalN, data.pomoTodayMin);
+           pTodayN, pTotalN, pTodayMin);
   u8g2.drawUTF8(10, 176, buf);
-  if (!strcmp(data.pomoMode, "break")) {
+  if (pMode == P_BREAK) {
     u8g2.drawUTF8(10, 200, "离开屏幕，喝口水，看看远处");
   }
 
@@ -716,11 +771,10 @@ bool renderIfChanged(const char* newHash) {
 }
 
 void buildHash(char* out, size_t n) {
-  snprintf(out, n, "%d|%s|%s|%s|%.0f|%.0f|%d|%d|%d|%d|%s%d/%d|", page, data.clock, data.datecn,
+  snprintf(out, n, "%d|%s|%s|%s|%.0f|%.0f|%d|%d|%d|%d|", page, data.clock, data.datecn,
            data.wxText, data.gpt5h, data.gptWeek,
            (int)data.claudeTok, (int)data.piTok, (int)(data.dshBalance * 100),
-           data.procClaude + data.procCodex + data.procPi,
-           data.pomoMode, data.pomoRemaining, data.pomoTodayN);
+           data.procClaude + data.procCodex + data.procPi);
   size_t len = strlen(out);
   for (int i = 0; i < data.n && len < n - 40; i++) {
     snprintf(out + len, n - len, "%s%d|%.14s|", data.s[i].state, data.s[i].age / 60,
@@ -737,7 +791,7 @@ void buildHash(char* out, size_t n) {
 
 // ---------------- buttons ----------------
 // facing the screen (confirmed on device): LEFT = KEY (GPIO18) = page /
-// long-press acks notifs; RIGHT = BOOT (GPIO0) = pomodoro start/pause
+// long-press acks notifs; RIGHT = BOOT (GPIO0) = LOCAL pomodoro controls
 void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allowStart) {
   if (!pressed) {
     // released: fire the short-press if confirmed and inside the window
@@ -749,20 +803,7 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allow
         } else {
           if (now - lastRightFire < 1200) { b.pressStart = 0; b.confirmStart = 0; return; }
           lastRightFire = now;
-          Serial.print("POMO\n");   // right short: start / pause / resume
-          // optimistic local toggle: react instantly, server truth resyncs
-          if (!strcmp(data.pomoMode, "idle")) {
-            strlcpy(data.pomoMode, "focus", sizeof(data.pomoMode));
-            data.pomoPaused = false;
-            pomoShowRem = data.pomoFocusMin * 60;
-            pomoRunning = true;
-          } else if (!data.pomoPaused) {
-            data.pomoPaused = true;
-            pomoRunning = false;
-          } else {
-            data.pomoPaused = false;
-            pomoRunning = true;
-          }
+          pomoPress();             // fully local: start / pause / resume
         }
         if (lastDataMs) render();
       }
@@ -787,7 +828,7 @@ void stepButton(BtnState& b, bool isLeft, bool pressed, uint32_t now, bool allow
           u8g2.sendBuffer();
         }
       } else {
-        Serial.print("POMO_RST\n"); // right long: reset the tomato
+        pomoReset();               // right long: reset, tomato not counted
       }
     }
     return;
@@ -834,6 +875,11 @@ void setup() {
   pinMode(BOOT_PIN, INPUT_PULLUP);
   memset(&btnLeft, 0, sizeof(btnLeft));
   memset(&btnRight, 0, sizeof(btnRight));
+  prefs.begin("agentboard", false);
+  pTotalN = prefs.getUInt("tt", 0);
+  pTodayN = prefs.getUInt("tn", 0);
+  pTodayMin = prefs.getUInt("tm", 0);
+  prefs.getString("pd", pDate, sizeof(pDate));
 #if USE_WIFI
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -895,10 +941,9 @@ void loop() {
     }
   }
   handleButton();
-  // pomo countdown ticks locally once a second, independent of push cadence
-  if (pomoRunning && pomoShowRem > 0 && millis() - lastSecTick >= 1000) {
+  pomoTick();                       // local state machine + 1s display cadence
+  if (pMode != P_IDLE && millis() - lastSecTick >= 1000) {
     lastSecTick = millis();
-    pomoShowRem--;
     if (page == 3 && lastDataMs) render();
   }
   static uint32_t lastTick = 0;
