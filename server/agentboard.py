@@ -56,6 +56,8 @@ DEFAULTS = {
     "weather_lon": 114.0579,
     "weather_interval_sec": 3600,
     "codex_state_file": str(HOME / "agentboard" / "server" / "codex_state.json"),
+    "gpt_usage_interval_sec": 60,
+    "codex_auth_file": str(HOME / ".codex" / "auth.json"),
     "pomo_file": str(HOME / "agentboard" / "server" / "pomo.json"),
     "pomo_focus_min": 25,
     "pomo_break_min": 5,
@@ -948,7 +950,7 @@ def build_snapshot(col: Collector):
             "plan": d.get("plan_type"),
             "primary": d.get("primary"), "secondary": d.get("secondary"),
             "credits": d.get("credits"), "ts": q["ts"],
-            "limited": Collector.quota_limited,
+            "limited": Collector.quota_limited or bool(d.get("limit_reached")),
             "today_cache": int(codex_cache),
         }
     tok = cost = 0.0
@@ -1096,6 +1098,64 @@ def play_sound(name, volume=None):
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+def fetch_gpt_usage():
+    """Official ChatGPT/Codex rate limits via the backend usage endpoint.
+    Much fresher than scraping rollout logs (which only carry rate_limits
+    on some requests)."""
+    try:
+        d = json.load(open(CFG["codex_auth_file"]))
+        tok = d["tokens"]["access_token"]
+        acct = d["tokens"]["account_id"]
+    except Exception:
+        return None
+    req = urllib.request.Request(
+        "https://chatgpt.com/backend-api/codex/usage",
+        headers={"Authorization": f"Bearer {tok}", "chatgpt-account-id": acct,
+                 "Accept": "application/json", "User-Agent": "codex_cli_rs/0.166.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            j = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print(f"[{time.strftime('%H:%M:%S')}] gpt usage 401: token expired — "
+                  f"run `codex login` once to refresh; falling back to log snapshots",
+                  flush=True)
+        return None
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] gpt usage error: {e}", flush=True)
+        return None
+    rl = j.get("rate_limit") or {}
+    prim = rl.get("primary_window") or {}
+    sec = rl.get("secondary_window") or {}
+    if prim.get("used_percent") is None:
+        return None
+    return {
+        "plan_type": j.get("plan_type"),
+        "primary": {"used_percent": prim.get("used_percent"),
+                    "resets_at": prim.get("reset_at"),
+                    "window_minutes": (prim.get("limit_window_seconds") or 0) // 60},
+        "secondary": {"used_percent": sec.get("used_percent"),
+                      "resets_at": sec.get("reset_at"),
+                      "window_minutes": (sec.get("limit_window_seconds") or 0) // 60},
+        "credits": j.get("credits"),
+        "limit_reached": rl.get("limit_reached"),
+        "ts": time.time(),
+    }
+
+
+def gpt_usage_loop():
+    while True:
+        try:
+            fresh = fetch_gpt_usage()
+            if fresh:
+                # same {ts, data} shape as log-parsed snapshots so consumers match
+                Collector.quota_codex = {"ts": fresh["ts"], "data": fresh}
+                Collector.quota_limited = bool(fresh.get("limit_reached"))
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] gpt usage loop error: {e}", flush=True)
+        time.sleep(CFG["gpt_usage_interval_sec"])
 
 
 def fetch_dsh_balance():
@@ -1424,6 +1484,7 @@ def main():
     pomo_mirror_load()
     threading.Thread(target=refresher, daemon=True).start()
     threading.Thread(target=dsh_balance_loop, daemon=True).start()
+    threading.Thread(target=gpt_usage_loop, daemon=True).start()
     threading.Thread(target=weather_loop, daemon=True).start()
     threading.Thread(target=serial_pusher, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), Handler)

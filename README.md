@@ -38,7 +38,7 @@
 
 - **会话状态**：`running` = 会话文件 60 秒内有写入（agent 真在干活）；`idle` = 安静 1 小时内（等输入/闲）；`done` = 更久（24h 窗口内）。**通知** = 状态从 running 翻转为 idle（一轮干完，等你）
 - **通知确认**：屏上长按 KEY（发 `ACK` 回 Mac）或浏览器"全部清除"按钮（`POST /api/ack`）；通知持久化在 `server/notifs.json`，服务重启不丢
-- **ChatGPT 额度**：从 Codex 会话文件里解析的 ChatGPT 账号官方额度窗口（5 小时 + 每周，含重置时间）。ChatGPT 网页版普通聊天额度无官方 API，不覆盖
+- **ChatGPT 额度**：每 60 秒直查 ChatGPT 官方接口 `chatgpt.com/backend-api/codex/usage`（用 `~/.codex/auth.json` 的账户凭据），实时准确；接口失败时自动降级为解析本地 Codex 会话日志里的 rate_limits 快照。token 过期（401）时跑一次 `codex login` 即可
 - **DSH（DeepSeek Harness）**：会话（zstd jsonl）+ 账户余额（platform.deepseek.com 钱包接口，x-dsh-auth-token 认证，5 分钟刷新）+ 分模型今日用量
 - **Claude 统计**：本地解析 transcript 的今日 token / 费用估算（外部 API 模型如 GLM 没有价格表，费用为 0 只计数）
 - **ChatGPT 桌面版会话**：Codex Desktop originator 的线程，自动归类到 `chatgpt` 名下
