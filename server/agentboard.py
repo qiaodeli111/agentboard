@@ -14,6 +14,7 @@ API:    GET /            HTML dashboard (debug/preview)
 
 import glob
 import json
+import select
 import os
 import re
 import socket
@@ -1217,14 +1218,19 @@ def fetch_weather():
 
 
 def weather_loop():
+    """Success: refresh hourly. Failure (e.g. network not ready right after
+    boot): retry in 60s instead of waiting out the full hour."""
     while True:
         try:
             w = fetch_weather()
             if w:
                 Collector.weather = w
+                time.sleep(CFG["weather_interval_sec"])
+            else:
+                time.sleep(60)
         except Exception as e:
             print(f"[agentboard] weather error: {e}", flush=True)
-        time.sleep(CFG["weather_interval_sec"])
+            time.sleep(60)
 
 
 def load_codex_state():
@@ -1292,6 +1298,18 @@ def find_serial_device():
     return None
 
 
+def close_serial(fd):
+    """Discard pending output first so close() can't block on a dead device."""
+    try:
+        termios.tcflush(fd, termios.TCOFLUSH)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def open_serial(dev):
     """Open the CDC device raw 8N1, VMIN=0/VTIME=0 (reads never block)."""
     fd = os.open(dev, os.O_RDWR | os.O_NOCTTY)
@@ -1316,9 +1334,13 @@ def open_serial(dev):
 
 def serial_pusher():
     """Keep the CDC port open, push a JSON frame every ~10s (or when woken),
-    and read back ACK lines from the display's KEY button."""
+    and read back ACK lines from the display's KEY button. The fd is
+    reopened every 45s: after a Mac reboot the old connection can become a
+    silent black hole (writes succeed, device never sees the bytes) when
+    the service starts before USB finishes re-enumerating."""
     global SNAPSHOT
     fd = None
+    fd_open_since = 0.0
     rx = b""
     last_push = 0.0
     while True:
@@ -1328,9 +1350,15 @@ def serial_pusher():
                 if dev:
                     try:
                         fd = open_serial(dev)
-                        print(f"[agentboard] serial open: {dev}", flush=True)
+                        fd_open_since = time.time()
+                        last_push = 0.0            # push a fresh frame right away
+                        print(f"[{time.strftime('%H:%M:%S')}] serial open: {dev}", flush=True)
                     except OSError:
                         fd = None
+            elif time.time() - fd_open_since > 45:
+                os.close(fd)
+                fd = None                          # reopened on the next tick
+                continue
             if fd is not None:
                 # read any ACK lines (never blocks: VMIN=0/VTIME=0)
                 try:
@@ -1360,7 +1388,7 @@ def serial_pusher():
                                 os.write(fd, wire_payload(snap))
                             last_push = time.time()
                 except OSError:
-                    os.close(fd)
+                    close_serial(fd)
                     fd = None
                 # periodic push
                 if fd is not None and time.time() - last_push >= CFG.get("push_interval_sec", 10):
@@ -1368,9 +1396,17 @@ def serial_pusher():
                         snap = SNAPSHOT
                     if snap.get("generated_at"):
                         try:
+                            # bounded write: a black-hole fd after USB
+                            # re-enumeration used to block this thread forever,
+                            # wedging the whole service (and port 8899 with it)
+                            _, w, _ = select.select([], [fd], [], 3.0)
+                            if not w:
+                                raise TimeoutError("serial write not writable in 3s")
                             os.write(fd, wire_payload(snap))
-                        except OSError:
-                            os.close(fd)
+                        except Exception as e:
+                            print(f"[{time.strftime('%H:%M:%S')}] serial push failed: {e} — reopening",
+                                  flush=True)
+                            close_serial(fd)
                             fd = None
                     last_push = time.time()
         except Exception as e:
