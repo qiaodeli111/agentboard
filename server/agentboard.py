@@ -53,8 +53,9 @@ DEFAULTS = {
     "dsh_dir": str(HOME / ".dsh" / "sessions"),
     "dsh_credentials": str(HOME / ".dsh" / ".credentials.yaml"),
     "dsh_balance_interval_sec": 300,
-    "weather_lat": 22.5431,          # Shenzhen
+    "weather_lat": 22.5431,          # Shenzhen (open-meteo fallback)
     "weather_lon": 114.0579,
+    "weather_city_code": "101280601",  # 中国天气网城市代码: 深圳
     "weather_interval_sec": 3600,
     "codex_state_file": str(HOME / "agentboard" / "server" / "codex_state.json"),
     "gpt_usage_interval_sec": 60,
@@ -1203,7 +1204,23 @@ WMO_TEXT = {0: "晴", 1: "多云", 2: "多云", 3: "阴", 45: "雾", 48: "雾",
 
 
 def fetch_weather():
-    """Open-Meteo current conditions, no API key."""
+    """国内源优先：中国天气网 sojson 镜像（免 key，含实时温度/湿度/空气）。
+    不可达时回退 open-meteo（境外，办公网可能直连不通）。"""
+    try:
+        req = urllib.request.Request(
+            "http://t.weather.sojson.com/api/weather/city/" + CFG["weather_city_code"],
+            headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            j = json.loads(r.read().decode("utf-8"))
+        if j.get("status") == 200:
+            data = j.get("data") or {}
+            city = ((j.get("cityInfo") or {}).get("city") or "深圳").removesuffix("市")
+            typ = ((data.get("forecast") or [{}])[0]).get("type") or ""
+            wendu = data.get("wendu")
+            if wendu:
+                return {"text": f"{city} {float(wendu):.0f}℃ {typ}", "ts": time.time()}
+    except Exception:
+        pass
     url = (f"https://api.open-meteo.com/v1/forecast"
            f"?latitude={CFG['weather_lat']}&longitude={CFG['weather_lon']}"
            f"&current=temperature_2m,weather_code&timezone=Asia%2FShanghai")
